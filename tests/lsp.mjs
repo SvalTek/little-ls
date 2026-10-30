@@ -128,8 +128,26 @@ async function main() {
   const children = classSymbols.result[0].children ?? [];
   assert.deepEqual(children.map((child) => [child.name, child.kind]), [["x", 8], ["length", 6]]);
 
-  send({ jsonrpc: "2.0", id: 4, method: "shutdown" });
-  const shutdown = await waitFor((message) => message.id === 4);
+  const operatorUri = "file:///test/operator.little";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: operatorUri, languageId: "little", version: 1, text: "var x = 1\n/\n" } }
+  });
+  const malformed = await waitFor(
+    (message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === operatorUri
+  );
+  assert.equal(malformed.params.diagnostics.length, 1);
+  assert.match(malformed.params.diagnostics[0].message, /Malformed expression/);
+
+  // The server must stay alive after a malformed expression (this used to crash
+  // the parser when an operator had no operands).
+  send({ jsonrpc: "2.0", id: 4, method: "textDocument/documentSymbol", params: { textDocument: { uri: operatorUri } } });
+  const operatorSymbols = await waitFor((message) => message.id === 4);
+  assert.deepEqual(operatorSymbols.result, []);
+
+  send({ jsonrpc: "2.0", id: 5, method: "shutdown" });
+  const shutdown = await waitFor((message) => message.id === 5);
   assert.equal(shutdown.result, null);
 
   send({ jsonrpc: "2.0", method: "exit" });
