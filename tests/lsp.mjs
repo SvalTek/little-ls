@@ -139,6 +139,9 @@ async function main() {
   );
   assert.equal(malformed.params.diagnostics.length, 1);
   assert.match(malformed.params.diagnostics[0].message, /Malformed expression/);
+  assert.equal(malformed.params.diagnostics[0].range.start.line, 1);
+  assert.equal(malformed.params.diagnostics[0].range.start.character, 0);
+  assert.equal(malformed.params.diagnostics[0].range.end.character, 1);
 
   // The server must stay alive after a malformed expression (this used to crash
   // the parser when an operator had no operands).
