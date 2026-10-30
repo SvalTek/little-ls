@@ -338,24 +338,37 @@ static const char* token_name(lt_Analysis* analysis, lt_Token* token)
 	return LTLS_BUFFER_AT(lt_Identifier, analysis->tokens.identifier_buffer, token->idx)->name;
 }
 
-static void add_symbol(yyjson_mut_doc* document, yyjson_mut_val* list, const ltls_LineIndex* index,
-                       const char* text, const char* name, int kind, lt_Token* token,
-                       yyjson_mut_val* children)
+static lt_Span span_union(lt_Span a, lt_Span b)
 {
-	if (!name || !token) return;
+	lt_Span span = a;
+	if (b.start < span.start) span.start = b.start;
+	if (b.end > span.end) span.end = b.end;
+	return span;
+}
+
+static void add_symbol(yyjson_mut_doc* document, yyjson_mut_val* list, const ltls_LineIndex* index,
+                       const char* text, const char* name, int kind, lt_Token* name_token,
+                       lt_Span span, yyjson_mut_val* children)
+{
+	if (!name || !name_token) return;
+	if (span.end <= span.start) span = name_token->span;
+
+	/* The range must enclose the selection range or clients drop the symbol. */
+	if (name_token->span.start < span.start) span.start = name_token->span.start;
+	if (name_token->span.end > span.end) span.end = name_token->span.end;
 
 	yyjson_mut_val* symbol = yyjson_mut_obj(document);
 	yyjson_mut_obj_add_strcpy(document, symbol, "name", name);
 	yyjson_mut_obj_add_int(document, symbol, "kind", kind);
 
 	yyjson_mut_val* range = yyjson_mut_obj(document);
-	yyjson_mut_obj_add_val(document, range, "start", position_object(document, index, text, token->span.start));
-	yyjson_mut_obj_add_val(document, range, "end", position_object(document, index, text, token->span.end));
+	yyjson_mut_obj_add_val(document, range, "start", position_object(document, index, text, span.start));
+	yyjson_mut_obj_add_val(document, range, "end", position_object(document, index, text, span.end));
 	yyjson_mut_obj_add_val(document, symbol, "range", range);
 
 	yyjson_mut_val* selection = yyjson_mut_obj(document);
-	yyjson_mut_obj_add_val(document, selection, "start", position_object(document, index, text, token->span.start));
-	yyjson_mut_obj_add_val(document, selection, "end", position_object(document, index, text, token->span.end));
+	yyjson_mut_obj_add_val(document, selection, "start", position_object(document, index, text, name_token->span.start));
+	yyjson_mut_obj_add_val(document, selection, "end", position_object(document, index, text, name_token->span.end));
 	yyjson_mut_obj_add_val(document, symbol, "selectionRange", selection);
 
 	if (children) yyjson_mut_obj_add_val(document, symbol, "children", children);
@@ -376,7 +389,7 @@ static void emit_body_symbols(yyjson_mut_doc* document, yyjson_mut_val* list, lt
 			int kind = (node->declare.expr && node->declare.expr->type == LT_AST_NODE_FN)
 				? LTLS_SYMBOL_FUNCTION : LTLS_SYMBOL_VARIABLE;
 			add_symbol(document, list, index, text, token_name(analysis, node->declare.identifier),
-				kind, node->declare.identifier, 0);
+				kind, node->declare.identifier, node->span, 0);
 		}
 		else if (node->type == LT_AST_NODE_CLASS)
 		{
@@ -396,12 +409,14 @@ static void emit_body_symbols(yyjson_mut_doc* document, yyjson_mut_val* list, lt
 				default: kind = LTLS_SYMBOL_FIELD; break;
 				}
 
+				lt_Span span = member->name ? member->name->span : (lt_Span){ 0, 0 };
+				if (member->value) span = span_union(span, member->value->span);
 				add_symbol(document, children, index, text, token_name(analysis, member->name),
-					kind, member->name, 0);
+					kind, member->name, span, 0);
 			}
 
 			add_symbol(document, list, index, text, token_name(analysis, node->class_decl.identifier),
-				LTLS_SYMBOL_CLASS, node->class_decl.identifier, children);
+				LTLS_SYMBOL_CLASS, node->class_decl.identifier, node->span, children);
 		}
 	}
 }

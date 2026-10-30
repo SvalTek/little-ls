@@ -115,7 +115,11 @@ async function main() {
   assert.equal(symbols.result[0].name, "x");
   assert.equal(symbols.result[0].kind, 13);
   assert.equal(symbols.result[0].range.start.line, 0);
-  assert.equal(symbols.result[0].range.start.character, 4);
+  assert.equal(symbols.result[0].range.start.character, 0);
+  assert.equal(symbols.result[0].range.end.line, 0);
+  assert.equal(symbols.result[0].range.end.character, 9);
+  assert.equal(symbols.result[0].selectionRange.start.character, 4);
+  assert.equal(symbols.result[0].selectionRange.end.character, 5);
 
   const classUri = "file:///test/klass.little";
   const classSource = "class Point {\n  x\n  length() {\n    return 1\n  }\n}\n";
@@ -131,8 +135,14 @@ async function main() {
   assert.equal(classSymbols.result.length, 1);
   assert.equal(classSymbols.result[0].name, "Point");
   assert.equal(classSymbols.result[0].kind, 5);
+  assert.equal(classSymbols.result[0].range.end.line, 5);
+  assert.equal(classSymbols.result[0].range.end.character, 1);
   const children = classSymbols.result[0].children ?? [];
   assert.deepEqual(children.map((child) => [child.name, child.kind]), [["x", 8], ["length", 6]]);
+  assert.equal(children[1].range.start.line, 2);
+  assert.equal(children[1].range.start.character, 2);
+  assert.equal(children[1].range.end.line, 4);
+  assert.equal(children[1].range.end.character, 3);
 
   const operatorUri = "file:///test/operator.little";
   const operatorSource = "var x = 1\n/\nclass Point {\n  x\n}\n";
