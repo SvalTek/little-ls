@@ -2,7 +2,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #include "little.h"
+#include "lsp.h"
+
+#define LTLS_VERSION "0.1.0"
 
 static void ignore_error(lt_VM* vm, const char* message)
 {
@@ -72,9 +80,12 @@ static int check_file(lt_VM* vm, const char* path)
 static void usage(FILE* stream)
 {
 	fprintf(stream,
-		"Usage: little-ls --check FILE...\n"
+		"Usage: little-ls [--stdio]\n"
+		"       little-ls --check FILE...\n"
 		"\n"
+		"  --stdio        Serve the language server protocol on stdin/stdout (default).\n"
 		"  --check FILE   Parse FILE and report diagnostics without executing it.\n"
+		"  -v, --version  Show the server version.\n"
 		"  -h, --help     Show this help.\n");
 }
 
@@ -86,27 +97,49 @@ int main(int argc, char** argv)
 		return 0;
 	}
 
-	if (argc < 3 || strcmp(argv[1], "--check") != 0)
+	if (argc >= 2 && (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0))
 	{
-		usage(stderr);
-		return 2;
+		printf("%s %s\n", "little-ls", LTLS_VERSION);
+		return 0;
 	}
 
-	lt_VM* vm = lt_open(malloc, free, ignore_error);
-	if (!vm)
+	if (argc >= 2 && strcmp(argv[1], "--check") == 0)
 	{
-		fprintf(stderr, "little-ls: failed to create VM\n");
-		return 2;
+		if (argc < 3)
+		{
+			usage(stderr);
+			return 2;
+		}
+
+		lt_VM* vm = lt_open(malloc, free, ignore_error);
+		if (!vm)
+		{
+			fprintf(stderr, "little-ls: failed to create VM\n");
+			return 2;
+		}
+
+		int status = 0;
+		for (int i = 2; i < argc; i++)
+		{
+			int result = check_file(vm, argv[i]);
+			if (result == 2) status = 2;
+			else if (result == 1 && status == 0) status = 1;
+		}
+
+		lt_destroy(vm);
+		return status;
 	}
 
-	int status = 0;
-	for (int i = 2; i < argc; i++)
+	if (argc == 1 || (argc == 2 && strcmp(argv[1], "--stdio") == 0))
 	{
-		int result = check_file(vm, argv[i]);
-		if (result == 2) status = 2;
-		else if (result == 1 && status == 0) status = 1;
+#ifdef _WIN32
+		_setmode(_fileno(stdin), _O_BINARY);
+		_setmode(_fileno(stdout), _O_BINARY);
+#endif
+		ltls_serve_stdio();
+		return 0;
 	}
 
-	lt_destroy(vm);
-	return status;
+	usage(stderr);
+	return 2;
 }

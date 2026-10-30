@@ -24,12 +24,18 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 # because worker VMs get their initializer from the host instead.
 & $Compiler -std=c11 -O2 -Wall -Wextra `
     -I (Join-Path $LittleRoot "src") `
+    -I (Join-Path $LittleRoot "vendor/yyjson") `
+    -DYYJSON_READER_DEPTH_LIMIT=64 `
+    -DYYJSON_WRITER_DEPTH_LIMIT=64 `
     (Join-Path $repo "src/main.c") `
+    (Join-Path $repo "src/lsp.c") `
+    (Join-Path $repo "src/documents.c") `
     (Join-Path $LittleRoot "src/little.c") `
     (Join-Path $LittleRoot "src/little_analysis.c") `
     (Join-Path $LittleRoot "src/little_buffer.c") `
     (Join-Path $LittleRoot "src/little_common.c") `
     (Join-Path $LittleRoot "src/little_async.c") `
+    (Join-Path $LittleRoot "vendor/yyjson/yyjson.c") `
     -o $outPath
 
 if ($LASTEXITCODE -ne 0) {

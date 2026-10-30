@@ -37,3 +37,19 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "Analysis tests failed with exit code $LASTEXITCODE"
 }
+
+& (Join-Path $repo "build.ps1") -LittleRoot $LittleRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "Server build failed with exit code $LASTEXITCODE"
+}
+
+$node = Get-Command node -ErrorAction SilentlyContinue
+if ($node) {
+    & node (Join-Path $repo "tests/lsp.mjs") (Join-Path $repo "build/little-ls.exe")
+    if ($LASTEXITCODE -ne 0) {
+        throw "LSP tests failed with exit code $LASTEXITCODE"
+    }
+}
+else {
+    Write-Host "node not found; skipping LSP protocol tests"
+}
