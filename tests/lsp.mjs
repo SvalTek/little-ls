@@ -39,6 +39,7 @@ server.stdout.on("data", (chunk) => {
     buffer = buffer.subarray(separator + 4 + length);
 
     const message = JSON.parse(body);
+    if (process.env.LSP_DEBUG) console.error("recv", message.id ?? message.method);
     const waiter = waiters.shift();
     if (waiter) waiter(message);
     else queued.push(message);
@@ -53,10 +54,15 @@ function nextMessage(timeout) {
   });
 }
 
-async function waitFor(predicate, timeout = 5000) {
+async function waitFor(predicate, label, timeout = 5000) {
   const deadline = Date.now() + timeout;
   for (;;) {
-    const message = await nextMessage(Math.max(1, deadline - Date.now()));
+    let message;
+    try {
+      message = await nextMessage(Math.max(1, deadline - Date.now()));
+    } catch (error) {
+      throw new Error(`${label}: ${error.message}`);
+    }
     if (predicate(message)) return message;
   }
 }
@@ -72,7 +78,7 @@ const closed = new Promise((resolve) => server.on("close", (code) => resolve(cod
 
 async function main() {
   send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { capabilities: {}, processId: process.pid, rootUri: null } });
-  const initialize = await waitFor((message) => message.id === 1);
+  const initialize = await waitFor((message) => message.id === 1, "initialize");
   assert.equal(initialize.result.capabilities.textDocumentSync, 1);
   assert.equal(initialize.result.capabilities.documentSymbolProvider, true);
 
@@ -85,7 +91,7 @@ async function main() {
     params: { textDocument: { uri, languageId: "little", version: 1, text: "var x = 1\nvar 2 = 3\n" } }
   });
 
-  const invalid = await waitFor((message) => message.method === "textDocument/publishDiagnostics");
+  const invalid = await waitFor((message) => message.method === "textDocument/publishDiagnostics", "open diagnostics");
   assert.equal(invalid.params.uri, uri);
   assert.equal(invalid.params.diagnostics.length, 1, "expected exactly one diagnostic");
   assert.equal(invalid.params.diagnostics[0].range.start.line, 1);
@@ -100,11 +106,11 @@ async function main() {
     params: { textDocument: { uri, version: 2 }, contentChanges: [{ text: "var x = 1\n" }] }
   });
 
-  const fixed = await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.version === 2);
+  const fixed = await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.version === 2, "cleared diagnostics");
   assert.equal(fixed.params.diagnostics.length, 0, "diagnostics were not cleared");
 
   send({ jsonrpc: "2.0", id: 2, method: "textDocument/documentSymbol", params: { textDocument: { uri } } });
-  const symbols = await waitFor((message) => message.id === 2);
+  const symbols = await waitFor((message) => message.id === 2, "symbols");
   assert.equal(symbols.result.length, 1);
   assert.equal(symbols.result[0].name, "x");
   assert.equal(symbols.result[0].kind, 13);
@@ -118,10 +124,10 @@ async function main() {
     method: "textDocument/didOpen",
     params: { textDocument: { uri: classUri, languageId: "little", version: 1, text: classSource } }
   });
-  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === classUri);
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === classUri, "class diagnostics");
 
   send({ jsonrpc: "2.0", id: 3, method: "textDocument/documentSymbol", params: { textDocument: { uri: classUri } } });
-  const classSymbols = await waitFor((message) => message.id === 3);
+  const classSymbols = await waitFor((message) => message.id === 3, "class symbols");
   assert.equal(classSymbols.result.length, 1);
   assert.equal(classSymbols.result[0].name, "Point");
   assert.equal(classSymbols.result[0].kind, 5);
@@ -129,13 +135,15 @@ async function main() {
   assert.deepEqual(children.map((child) => [child.name, child.kind]), [["x", 8], ["length", 6]]);
 
   const operatorUri = "file:///test/operator.little";
+  const operatorSource = "var x = 1\n/\nclass Point {\n  x\n}\n";
   send({
     jsonrpc: "2.0",
     method: "textDocument/didOpen",
-    params: { textDocument: { uri: operatorUri, languageId: "little", version: 1, text: "var x = 1\n/\n" } }
+    params: { textDocument: { uri: operatorUri, languageId: "little", version: 1, text: operatorSource } }
   });
   const malformed = await waitFor(
-    (message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === operatorUri
+    (message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === operatorUri,
+    "operator diagnostics"
   );
   assert.equal(malformed.params.diagnostics.length, 1);
   assert.match(malformed.params.diagnostics[0].message, /Malformed expression/);
@@ -144,13 +152,14 @@ async function main() {
   assert.equal(malformed.params.diagnostics[0].range.end.character, 1);
 
   // The server must stay alive after a malformed expression (this used to crash
-  // the parser when an operator had no operands).
+  // the parser when an operator had no operands), and analysis must resume so
+  // declarations after the broken statement are still visible.
   send({ jsonrpc: "2.0", id: 4, method: "textDocument/documentSymbol", params: { textDocument: { uri: operatorUri } } });
-  const operatorSymbols = await waitFor((message) => message.id === 4);
-  assert.deepEqual(operatorSymbols.result, []);
+  const operatorSymbols = await waitFor((message) => message.id === 4, "operator symbols");
+  assert.deepEqual(operatorSymbols.result.map((symbol) => [symbol.name, symbol.kind]), [["Point", 5]]);
 
   send({ jsonrpc: "2.0", id: 5, method: "shutdown" });
-  const shutdown = await waitFor((message) => message.id === 5);
+  const shutdown = await waitFor((message) => message.id === 5, "shutdown");
   assert.equal(shutdown.result, null);
 
   send({ jsonrpc: "2.0", method: "exit" });
@@ -163,6 +172,8 @@ main().then(
   () => { console.log("lsp tests passed"); },
   (error) => {
     console.error(error);
+    console.error(`server exited: ${server.exitCode}`);
+    console.error(`stderr: ${stderr}`);
     server.kill();
     process.exit(1);
   }

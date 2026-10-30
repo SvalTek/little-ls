@@ -263,8 +263,13 @@ static yyjson_mut_val* position_object(yyjson_mut_doc* document, const ltls_Line
    Diagnostics
    ------------------------------------------------------------------------- */
 
-static void publish_diagnostics(lt_VM* vm, const char* uri, int64_t version, const char* text)
+static void publish_diagnostics(const char* uri, int64_t version, const char* text)
 {
+	/* A fresh VM per analysis bounds the memory left behind by the parser's
+	   error-recovery paths, which can abandon partially built buffers. */
+	lt_VM* vm = lt_open(malloc, free, ignore_error);
+	if (!vm) return;
+
 	lt_Analysis analysis;
 	lt_analysis_run(vm, &analysis, text, uri);
 
@@ -280,7 +285,7 @@ static void publish_diagnostics(lt_VM* vm, const char* uri, int64_t version, con
 	yyjson_mut_obj_add_str(document, root, "method", "textDocument/publishDiagnostics");
 
 	yyjson_mut_val* params = yyjson_mut_obj(document);
-	yyjson_mut_obj_add_str(document, params, "uri", uri);
+	yyjson_mut_obj_add_strcpy(document, params, "uri", uri);
 	yyjson_mut_obj_add_int(document, params, "version", version);
 
 	yyjson_mut_val* list = yyjson_mut_arr(document);
@@ -305,8 +310,8 @@ static void publish_diagnostics(lt_VM* vm, const char* uri, int64_t version, con
 		yyjson_mut_val* entry = yyjson_mut_obj(document);
 		yyjson_mut_obj_add_val(document, entry, "range", range);
 		yyjson_mut_obj_add_int(document, entry, "severity", diagnostic->severity);
-		yyjson_mut_obj_add_str(document, entry, "source", "little");
-		yyjson_mut_obj_add_str(document, entry, "message", diagnostic->message);
+		yyjson_mut_obj_add_strcpy(document, entry, "source", "little");
+		yyjson_mut_obj_add_strcpy(document, entry, "message", diagnostic->message);
 		yyjson_mut_arr_add_val(list, entry);
 	}
 
@@ -318,6 +323,7 @@ static void publish_diagnostics(lt_VM* vm, const char* uri, int64_t version, con
 
 	line_index_free(&index);
 	lt_analysis_free(vm, &analysis);
+	lt_destroy(vm);
 }
 
 /* -------------------------------------------------------------------------
@@ -339,7 +345,7 @@ static void add_symbol(yyjson_mut_doc* document, yyjson_mut_val* list, const ltl
 	if (!name || !token) return;
 
 	yyjson_mut_val* symbol = yyjson_mut_obj(document);
-	yyjson_mut_obj_add_str(document, symbol, "name", name);
+	yyjson_mut_obj_add_strcpy(document, symbol, "name", name);
 	yyjson_mut_obj_add_int(document, symbol, "kind", kind);
 
 	yyjson_mut_val* range = yyjson_mut_obj(document);
@@ -432,11 +438,13 @@ static yyjson_mut_val* build_shutdown(yyjson_mut_doc* document, void* context)
 
 static yyjson_mut_val* build_document_symbols(yyjson_mut_doc* document, void* context)
 {
-	lt_VM* vm = ((void**)context)[0];
-	ltls_Document* target = ((void**)context)[1];
+	ltls_Document* target = context;
 
 	yyjson_mut_val* list = yyjson_mut_arr(document);
 	if (!target) return list;
+
+	lt_VM* vm = lt_open(malloc, free, ignore_error);
+	if (!vm) return list;
 
 	lt_Analysis analysis;
 	lt_analysis_run(vm, &analysis, target->text, target->uri);
@@ -448,6 +456,7 @@ static yyjson_mut_val* build_document_symbols(yyjson_mut_doc* document, void* co
 	line_index_free(&index);
 
 	lt_analysis_free(vm, &analysis);
+	lt_destroy(vm);
 	return list;
 }
 
@@ -463,7 +472,7 @@ static int64_t object_int(yyjson_val* object, const char* key)
 	return yyjson_is_int(value) ? yyjson_get_sint(value) : 0;
 }
 
-static void handle_message(lt_VM* vm, ltls_Documents* documents, char* body, size_t length,
+static void handle_message(ltls_Documents* documents, char* body, size_t length,
                            int* shutting_down)
 {
 	yyjson_doc* message = yyjson_read(body, length, 0);
@@ -499,7 +508,7 @@ static void handle_message(lt_VM* vm, ltls_Documents* documents, char* body, siz
 		{
 			int64_t version = object_int(document, "version");
 			if (ltls_documents_set(documents, uri, text, version))
-				publish_diagnostics(vm, uri, version, text);
+				publish_diagnostics(uri, version, text);
 		}
 	}
 	else if (strcmp(method, "textDocument/didChange") == 0)
@@ -514,7 +523,7 @@ static void handle_message(lt_VM* vm, ltls_Documents* documents, char* body, siz
 		{
 			int64_t version = object_int(document, "version");
 			if (ltls_documents_set(documents, uri, text, version))
-				publish_diagnostics(vm, uri, version, text);
+				publish_diagnostics(uri, version, text);
 		}
 	}
 	else if (strcmp(method, "textDocument/didClose") == 0)
@@ -524,14 +533,14 @@ static void handle_message(lt_VM* vm, ltls_Documents* documents, char* body, siz
 		if (uri)
 		{
 			ltls_documents_remove(documents, uri);
-			publish_diagnostics(vm, uri, 0, "");
+			publish_diagnostics(uri, 0, "");
 		}
 	}
 	else if (strcmp(method, "textDocument/documentSymbol") == 0)
 	{
 		yyjson_val* document = params ? yyjson_obj_get(params, "textDocument") : 0;
 		const char* uri = object_string(document, "uri");
-		void* context[2] = { vm, uri ? ltls_documents_find(documents, uri) : 0 };
+		void* context = uri ? ltls_documents_find(documents, uri) : 0;
 		if (id) send_message(id, build_document_symbols, context);
 	}
 	else if (id)
@@ -544,9 +553,6 @@ static void handle_message(lt_VM* vm, ltls_Documents* documents, char* body, siz
 
 void ltls_serve_stdio(void)
 {
-	lt_VM* vm = lt_open(malloc, free, ignore_error);
-	if (!vm) return;
-
 	ltls_Documents documents = { 0 };
 	int shutting_down = 0;
 
@@ -556,10 +562,9 @@ void ltls_serve_stdio(void)
 		char* body = read_message(&length);
 		if (!body) break;
 
-		handle_message(vm, &documents, body, length, &shutting_down);
+		handle_message(&documents, body, length, &shutting_down);
 		free(body);
 	}
 
 	ltls_documents_clear(&documents);
-	lt_destroy(vm);
 }
