@@ -660,8 +660,10 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 		yyjson_mut_obj_add_strcpy(document, contents, "kind", "markdown");
 		yyjson_mut_obj_add_strcpy(document, contents, "value", markdown.text);
 		yyjson_mut_obj_add_val(document, result, "contents", contents);
+
+		lt_Span highlight = (declaration->external && reference) ? reference->token->span : declaration->name->span;
 		yyjson_mut_obj_add_val(document, result, "range",
-			range_object(document, &state.lines, position->document->text, declaration->name->span));
+			range_object(document, &state.lines, position->document->text, highlight));
 
 		free(markdown.text);
 		free(signature);
@@ -685,7 +687,7 @@ static yyjson_mut_val* build_definition(yyjson_mut_doc* document, void* context)
 	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, 0);
 
 	yyjson_mut_val* result = 0;
-	if (declaration)
+	if (declaration && !declaration->external)
 	{
 		result = yyjson_mut_obj(document);
 		yyjson_mut_obj_add_strcpy(document, result, "uri", position->document->uri);

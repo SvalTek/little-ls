@@ -481,6 +481,32 @@ async function main() {
   assert.equal(linkedDefinition.result.range.start.line, 3);
   assert.equal(linkedDefinition.result.range.start.character, 2);
 
+  const stdUri = "file:///test/std.little";
+  const stdSource = "io.print(string.format(\"%s\", \"hi\"))\narray.each([1, 2])\nvar m = math.floor(1.5)\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: stdUri, languageId: "little", version: 1, text: stdSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === stdUri, "std diagnostics");
+
+  send({ jsonrpc: "2.0", id: 38, method: "textDocument/hover", params: { textDocument: { uri: stdUri }, position: { line: 0, character: 4 } } });
+  const printHover = await waitFor((message) => message.id === 38, "print hover");
+  assert.match(printHover.result.contents.value, /fn io\.print\(/);
+  assert.match(printHover.result.contents.value, /writes each argument/);
+
+  send({ jsonrpc: "2.0", id: 39, method: "textDocument/hover", params: { textDocument: { uri: stdUri }, position: { line: 0, character: 17 } } });
+  const formatHover = await waitFor((message) => message.id === 39, "format hover");
+  assert.match(formatHover.result.contents.value, /fn string\.format\(/);
+
+  send({ jsonrpc: "2.0", id: 40, method: "textDocument/hover", params: { textDocument: { uri: stdUri }, position: { line: 1, character: 7 } } });
+  const eachHover = await waitFor((message) => message.id === 40, "each hover");
+  assert.match(eachHover.result.contents.value, /fn array\.each\(/);
+
+  send({ jsonrpc: "2.0", id: 41, method: "textDocument/definition", params: { textDocument: { uri: stdUri }, position: { line: 0, character: 4 } } });
+  const printDefinition = await waitFor((message) => message.id === 41, "print definition");
+  assert.equal(printDefinition.result, null);
+
   send({ jsonrpc: "2.0", id: 37, method: "shutdown" });
   const finalShutdown = await waitFor((message) => message.id === 37, "shutdown");
   assert.equal(finalShutdown.result, null);

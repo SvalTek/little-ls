@@ -1,5 +1,6 @@
 #include "index.h"
 #include "docs.h"
+#include "std_symbols.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,9 +57,11 @@ static void add_declaration(ltls_Index* index, lt_Token* name, lt_Span span, lt_
 	declaration.types = 0;
 	declaration.annotation = 0;
 	declaration.detail = 0;
+	declaration.signature = 0;
 	declaration.kind = kind;
 	declaration.is_global = is_global;
 	declaration.from_doc = 0;
+	declaration.external = 0;
 	push_declaration(index, declaration);
 }
 
@@ -372,11 +375,11 @@ static lt_Token* synthetic_token(ltls_Index* index, lt_Span span, uint16_t line,
 	return token;
 }
 
-static lt_AstNode* synthetic_class(ltls_Index* index)
+static lt_AstNode* synthetic_node(ltls_Index* index, lt_AstNodeType type)
 {
 	lt_AstNode* node = calloc(1, sizeof(lt_AstNode));
 	if (!node) return 0;
-	node->type = LT_AST_NODE_CLASS;
+	node->type = type;
 
 	lt_AstNode** nodes = realloc(index->node_allocations, sizeof(lt_AstNode*) * (index->node_allocation_count + 1));
 	if (!nodes)
@@ -387,6 +390,57 @@ static lt_AstNode* synthetic_class(ltls_Index* index)
 	index->node_allocations = nodes;
 	index->node_allocations[index->node_allocation_count++] = node;
 	return node;
+}
+
+static lt_AstNode* synthetic_class(ltls_Index* index)
+{
+	return synthetic_node(index, LT_AST_NODE_CLASS);
+}
+
+/* Seeds the standard library surface generated from doc/std. User declarations
+   are added first, so a user global shadows a standard one. */
+static void seed_std_symbols(ltls_Index* index)
+{
+	for (uint32_t m = 0; m < LTLS_STD_MODULE_COUNT; m++)
+	{
+		const ltls_StdModule* module = &ltls_std_modules[m];
+		lt_AstNode* node = synthetic_node(index, LT_AST_NODE_TABLE);
+		lt_Token* token = synthetic_token(index, (lt_Span){ 0, 0 }, 0, 0, module->name);
+		if (!node || !token) continue;
+
+		add_declaration(index, token, token->span, 0, node, 0, LTLS_DECL_GLOBAL, 1);
+		ltls_Declaration* declaration = &index->declarations[index->declaration_count - 1];
+		declaration->types = ltls_type_add(index, 0, LTLS_TYPE_TABLE, node);
+		declaration->external = 1;
+
+		for (uint32_t i = 0; i < module->member_count; i++)
+		{
+			const ltls_StdEntry* member = &module->members[i];
+			lt_Token* member_token = synthetic_token(index, (lt_Span){ 0, 0 }, 0, 0, member->name);
+			if (!member_token) continue;
+
+			add_declaration(index, member_token, member_token->span, 0, node, 0, LTLS_DECL_FIELD, 0);
+			declaration = &index->declarations[index->declaration_count - 1];
+			declaration->types = ltls_type_add(index, 0, LTLS_TYPE_FUNCTION, 0);
+			declaration->signature = member->signature;
+			declaration->detail = (char*)member->detail;
+			declaration->external = 1;
+		}
+	}
+
+	for (uint32_t i = 0; i < LTLS_STD_GLOBAL_COUNT; i++)
+	{
+		const ltls_StdEntry* global = &ltls_std_globals[i];
+		lt_Token* token = synthetic_token(index, (lt_Span){ 0, 0 }, 0, 0, global->name);
+		if (!token) continue;
+
+		add_declaration(index, token, token->span, 0, 0, 0, LTLS_DECL_GLOBAL, 1);
+		ltls_Declaration* declaration = &index->declarations[index->declaration_count - 1];
+		declaration->types = ltls_type_add(index, 0, LTLS_TYPE_FUNCTION, 0);
+		declaration->signature = global->signature;
+		declaration->detail = (char*)global->detail;
+		declaration->external = 1;
+	}
 }
 
 /* `@class Name [: Base]` with `@field type name` members becomes a real class
@@ -522,6 +576,7 @@ void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis)
 	lt_AstNode* root = analysis->parser.root;
 	walk_body(index, &root->chunk.body, root->chunk.scope, 0, 0, 0);
 	build_doc_shapes(index);
+	seed_std_symbols(index);
 	ltls_types_build(index, analysis);
 }
 
@@ -532,6 +587,7 @@ void ltls_index_free(ltls_Index* index)
 
 	for (uint32_t i = 0; i < index->declaration_count; i++)
 	{
+		if (index->declarations[i].external) continue;
 		free(index->declarations[i].annotation);
 		free(index->declarations[i].detail);
 	}
@@ -708,7 +764,8 @@ static const ltls_Declaration* resolve_global(const ltls_Index* index, lt_Token*
 	for (uint32_t i = 0; i < index->declaration_count; i++)
 	{
 		const ltls_Declaration* declaration = &index->declarations[i];
-		if (declaration->is_global && declaration->name->idx == token->idx) return declaration;
+		if (!declaration->is_global) continue;
+		if (declaration_name_equals(index, declaration, token)) return declaration;
 	}
 	return 0;
 }
@@ -941,6 +998,14 @@ void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffe
 char* ltls_declaration_signature(const ltls_Index* index, const ltls_Declaration* declaration, ltls_TypeSet type_override)
 {
 	ltls_String string = { 0 };
+
+	if (declaration->signature)
+	{
+		string_append(&string, declaration->signature);
+		if (!string.text) string_append(&string, "");
+		return string.text;
+	}
+
 	string_append(&string, declaration->is_global ? "global " : "");
 
 	const char* name = token_text(index, declaration->name);

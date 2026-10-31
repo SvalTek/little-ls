@@ -47,9 +47,11 @@ typedef struct {
 	ltls_TypeSet types;
 	char* annotation;   /* field type text from a doc shape */
 	char* detail;       /* doc description for synthetic members */
+	const char* signature; /* display signature override (std symbols) */
 	uint8_t kind;
 	uint8_t is_global;
 	uint8_t from_doc;
+	uint8_t external;
 } ltls_Declaration;
 
 typedef struct {

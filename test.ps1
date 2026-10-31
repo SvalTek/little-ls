@@ -60,6 +60,23 @@ if ($LASTEXITCODE -ne 0) {
     throw "Docs tests failed with exit code $LASTEXITCODE"
 }
 
+$node = Get-Command node -ErrorAction SilentlyContinue
+if ($node) {
+    $check = Join-Path $outDir "std_symbols.check.h"
+    & node (Join-Path $repo "scripts/generate-std.mjs") "-o" $check
+    if ($LASTEXITCODE -ne 0) {
+        throw "std symbol generation failed with exit code $LASTEXITCODE"
+    }
+    $expected = Get-Content -Raw (Join-Path $repo "src/std_symbols.h")
+    $actual = Get-Content -Raw $check
+    if ($expected -ne $actual) {
+        throw "src/std_symbols.h is stale; run scripts/generate-std.mjs"
+    }
+}
+else {
+    Write-Host "node not found; skipping std symbol freshness check"
+}
+
 & (Join-Path $repo "build.ps1") -LittleRoot $LittleRoot
 if ($LASTEXITCODE -ne 0) {
     throw "Server build failed with exit code $LASTEXITCODE"
