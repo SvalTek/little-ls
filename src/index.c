@@ -576,6 +576,7 @@ void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis)
 	memset(index, 0, sizeof(ltls_Index));
 	index->tokens = &analysis->tokens;
 	index->source = analysis->source;
+	index->analysis = analysis;
 
 	if (!analysis->parser.root)
 	{
@@ -854,6 +855,131 @@ const ltls_Declaration* ltls_index_member(const ltls_Index* index, lt_AstNode* c
 const ltls_Declaration* ltls_index_table_field(const ltls_Index* index, lt_AstNode* table, lt_Token* token)
 {
 	return resolve_table_field(index, table, token);
+}
+
+static uint8_t declaration_names_match(const ltls_Index* index, const ltls_Declaration* left,
+                                       const ltls_Declaration* right)
+{
+	const char* a = token_text(index, left->name);
+	const char* b = token_text(index, right->name);
+	return a && b && strcmp(a, b) == 0;
+}
+
+static void add_member(const ltls_Index* index, const ltls_Declaration** out, uint32_t* count,
+                       uint32_t max, const ltls_Declaration* declaration)
+{
+	for (uint32_t i = 0; i < *count; i++)
+		if (declaration_names_match(index, out[i], declaration)) return;
+	if (*count < max) out[(*count)++] = declaration;
+}
+
+uint32_t ltls_index_members(const ltls_Index* index, lt_AstNode* class_node,
+                            const ltls_Declaration** out, uint32_t max)
+{
+	uint32_t count = 0;
+	for (uint8_t depth = 0; class_node && depth < 8; depth++)
+	{
+		for (uint32_t i = 0; i < index->declaration_count; i++)
+		{
+			const ltls_Declaration* declaration = &index->declarations[i];
+			if (declaration->node != class_node) continue;
+			if (declaration->kind < LTLS_DECL_FIELD || declaration->kind > LTLS_DECL_PROPERTY) continue;
+			add_member(index, out, &count, max, declaration);
+		}
+		class_node = superclass_node(index, class_node);
+	}
+	return count;
+}
+
+uint32_t ltls_index_table_members(const ltls_Index* index, lt_AstNode* table,
+                                  const ltls_Declaration** out, uint32_t max)
+{
+	uint32_t count = 0;
+	for (uint32_t i = 0; i < index->declaration_count; i++)
+	{
+		const ltls_Declaration* declaration = &index->declarations[i];
+		if (declaration->node != table) continue;
+		if (declaration->kind != LTLS_DECL_FIELD) continue;
+		add_member(index, out, &count, max, declaration);
+	}
+	return count;
+}
+
+static uint8_t node_covers(const lt_AstNode* node, uint32_t offset)
+{
+	return node && node->span.start <= offset && offset <= node->span.end;
+}
+
+static lt_AstNode* receiver_in_body(const ltls_Index* index, lt_Buffer* body, uint32_t offset,
+                                    lt_AstNode* class_node);
+static lt_AstNode* receiver_in_node(const ltls_Index* index, lt_AstNode* node, uint32_t offset,
+                                    lt_AstNode* class_node);
+
+static lt_AstNode* receiver_in_body(const ltls_Index* index, lt_Buffer* body, uint32_t offset,
+                                    lt_AstNode* class_node)
+{
+	for (uint32_t i = 0; i < body->length; i++)
+	{
+		lt_AstNode* found = receiver_in_node(index, *AT(lt_AstNode*, *body, i), offset, class_node);
+		if (found) return found;
+	}
+	return 0;
+}
+
+static lt_AstNode* receiver_in_node(const ltls_Index* index, lt_AstNode* node, uint32_t offset,
+                                    lt_AstNode* class_node)
+{
+	if (!node_covers(node, offset)) return 0;
+
+	switch (node->type)
+	{
+	case LT_AST_NODE_CHUNK:
+		return receiver_in_body(index, &node->chunk.body, offset, class_node);
+
+	case LT_AST_NODE_DECLARE:
+		return receiver_in_node(index, node->declare.expr, offset, class_node);
+
+	case LT_AST_NODE_FN: {
+		lt_AstNode* found = receiver_in_body(index, &node->fn.body, offset, class_node);
+		return found ? found : class_node;
+	}
+
+	case LT_AST_NODE_CLASS:
+		for (uint32_t i = 0; i < node->class_decl.members.length; i++)
+		{
+			lt_ClassMember* member = AT(lt_ClassMember, node->class_decl.members, i);
+			if (!member->value || !node_covers(member->value, offset)) continue;
+			lt_AstNode* found = receiver_in_node(index, member->value, offset, node);
+			if (found) return found;
+		}
+		return 0;
+
+	case LT_AST_NODE_IF:
+	case LT_AST_NODE_ELSEIF:
+	case LT_AST_NODE_ELSE: {
+		lt_AstNode* found = receiver_in_body(index, &node->branch.body, offset, class_node);
+		if (found) return found;
+		return node->branch.next ? receiver_in_node(index, node->branch.next, offset, class_node) : 0;
+	}
+
+	case LT_AST_NODE_FOR:
+	case LT_AST_NODE_WHILE:
+		return receiver_in_body(index, &node->loop.body, offset, class_node);
+
+	case LT_AST_NODE_WITH: {
+		lt_AstNode* found = receiver_in_body(index, &node->with_stmt.body, offset, class_node);
+		return found ? found : node->with_stmt.expr;
+	}
+
+	default:
+		return 0;
+	}
+}
+
+lt_AstNode* ltls_index_receiver_at(const ltls_Index* index, uint32_t offset)
+{
+	if (!index->analysis || !index->analysis->parser.root) return 0;
+	return receiver_in_node(index, index->analysis->parser.root, offset, 0);
 }
 
 /* `obj.name` and `@name` resolve through every alternative of the receiver's

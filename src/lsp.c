@@ -714,6 +714,23 @@ static yyjson_mut_val* build_initialize(yyjson_mut_doc* document, void* context)
 	yyjson_mut_obj_add_bool(document, capabilities, "documentSymbolProvider", true);
 	yyjson_mut_obj_add_bool(document, capabilities, "hoverProvider", true);
 	yyjson_mut_obj_add_bool(document, capabilities, "definitionProvider", true);
+
+	yyjson_mut_val* completion = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_bool(document, completion, "resolveProvider", false);
+	yyjson_mut_val* completion_triggers = yyjson_mut_arr(document);
+	yyjson_mut_arr_add_strcpy(document, completion_triggers, ".");
+	yyjson_mut_arr_add_strcpy(document, completion_triggers, ":");
+	yyjson_mut_arr_add_strcpy(document, completion_triggers, "@");
+	yyjson_mut_obj_add_val(document, completion, "triggerCharacters", completion_triggers);
+	yyjson_mut_obj_add_val(document, capabilities, "completionProvider", completion);
+
+	yyjson_mut_val* signature = yyjson_mut_obj(document);
+	yyjson_mut_val* signature_triggers = yyjson_mut_arr(document);
+	yyjson_mut_arr_add_strcpy(document, signature_triggers, "(");
+	yyjson_mut_arr_add_strcpy(document, signature_triggers, ",");
+	yyjson_mut_obj_add_val(document, signature, "triggerCharacters", signature_triggers);
+	yyjson_mut_obj_add_val(document, capabilities, "signatureHelpProvider", signature);
+
 	yyjson_mut_obj_add_val(document, result, "capabilities", capabilities);
 
 	yyjson_mut_val* info = yyjson_mut_obj(document);
@@ -765,6 +782,451 @@ static int64_t object_int(yyjson_val* object, const char* key)
 {
 	yyjson_val* value = yyjson_obj_get(object, key);
 	return yyjson_is_int(value) ? yyjson_get_sint(value) : 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Completion and signature help */
+
+static uint8_t is_name_character(char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') || c == '_';
+}
+
+static lt_Token* token_ending_at(const lt_Analysis* analysis, uint32_t offset)
+{
+	lt_Token* best = 0;
+	for (uint32_t i = 0; i < analysis->tokens.token_buffer.length; i++)
+	{
+		lt_Token* token = LTLS_BUFFER_AT(lt_Token, analysis->tokens.token_buffer, i);
+		if (token->flags & LT_TOKEN_SYNTHETIC) continue;
+		if (token->span.end != offset) continue;
+		if (!best || token->span.start > best->span.start) best = token;
+	}
+	return best;
+}
+
+static uint8_t scope_contains_offset(lt_Scope* scope, uint32_t offset)
+{
+	if (!scope) return 0;
+	if (!scope->last) return 1; /* the module scope covers trailing whitespace */
+
+	uint32_t start = scope->start ? scope->start->span.start : 0;
+	uint32_t end = (scope->end && scope->end > scope->start)
+		? (scope->end - 1)->span.end : UINT32_MAX;
+	return offset >= start && offset <= end;
+}
+
+static int completion_kind(const ltls_Declaration* declaration)
+{
+	switch (declaration->kind)
+	{
+	case LTLS_DECL_CLASS: return 7;      /* Class */
+	case LTLS_DECL_FUNCTION: return 3;   /* Function */
+	case LTLS_DECL_METHOD: return 2;     /* Method */
+	case LTLS_DECL_FIELD: return 5;      /* Field */
+	case LTLS_DECL_PROPERTY: return 10;  /* Property */
+	default: return 6;                   /* Variable */
+	}
+}
+
+static yyjson_mut_val* completion_item(yyjson_mut_doc* document, const ltls_Index* index,
+                                       const ltls_Declaration* declaration)
+{
+	const char* name = ltls_index_token_text(index, declaration->name);
+	if (!name) return 0;
+
+	yyjson_mut_val* item = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_strcpy(document, item, "label", name);
+	yyjson_mut_obj_add_int(document, item, "kind", completion_kind(declaration));
+
+	char* signature = ltls_declaration_signature(index, declaration, 0);
+	if (signature)
+	{
+		yyjson_mut_obj_add_strcpy(document, item, "detail", signature);
+		free(signature);
+	}
+	if (declaration->detail)
+		yyjson_mut_obj_add_strcpy(document, item, "documentation", declaration->detail);
+
+	return item;
+}
+
+static uint8_t member_already_listed(const ltls_Index* index, const ltls_Declaration** list,
+                                     uint32_t count, const ltls_Declaration* candidate)
+{
+	const char* name = ltls_index_token_text(index, candidate->name);
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const char* other = ltls_index_token_text(index, list[i]->name);
+		if (name && other && strcmp(name, other) == 0) return 1;
+	}
+	return 0;
+}
+
+static uint32_t collect_members(const ltls_Index* index, ltls_TypeSet types,
+                                const ltls_Declaration** out, uint32_t max)
+{
+	uint32_t count = 0;
+	const ltls_Declaration* batch[512];
+
+	for (ltls_TypeSet type = types; type; type = type->next)
+	{
+		uint32_t batch_count = 0;
+		if (type->kind == LTLS_TYPE_INSTANCE || type->kind == LTLS_TYPE_CLASS)
+			batch_count = ltls_index_members(index, type->node, batch, 512);
+		else if (type->kind == LTLS_TYPE_TABLE)
+			batch_count = ltls_index_table_members(index, type->node, batch, 512);
+
+		for (uint32_t i = 0; i < batch_count && count < max; i++)
+		{
+			if (member_already_listed(index, out, count, batch[i])) continue;
+			out[count++] = batch[i];
+		}
+	}
+	return count;
+}
+
+static void add_matching_members(yyjson_mut_doc* document, const ltls_Index* index,
+                                 const ltls_Declaration** members, uint32_t count,
+                                 const char* prefix, size_t prefix_length, yyjson_mut_val* items)
+{
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const char* name = ltls_index_token_text(index, members[i]->name);
+		if (!name || strncmp(name, prefix, prefix_length) != 0) continue;
+
+		yyjson_mut_val* item = completion_item(document, index, members[i]);
+		if (item) yyjson_mut_arr_add_val(items, item);
+	}
+}
+
+static const ltls_Declaration* declaration_named(const ltls_Index* index, const char* name, size_t length)
+{
+	for (uint32_t i = 0; i < index->declaration_count; i++)
+	{
+		const ltls_Declaration* declaration = &index->declarations[i];
+		if (declaration->kind == LTLS_DECL_FIELD || declaration->kind == LTLS_DECL_METHOD ||
+		    declaration->kind == LTLS_DECL_PROPERTY) continue;
+		const char* candidate = ltls_index_token_text(index, declaration->name);
+		if (candidate && strlen(candidate) == length && strncmp(candidate, name, length) == 0)
+			return declaration;
+	}
+	return 0;
+}
+
+static yyjson_mut_val* build_completion(yyjson_mut_doc* document, void* context)
+{
+	ltls_PositionContext* position = context;
+	if (!position->document) return 0;
+
+	ltls_AnalysisState state;
+	analysis_state_open(&state, position->document);
+	if (!state.vm) return 0;
+
+	const char* text = position->document->text;
+	uint32_t offset = position_to_offset(&state.lines, text, position->line, position->character);
+
+	uint32_t start = offset;
+	while (start > 0 && is_name_character(text[start - 1])) start--;
+	const char* prefix = text + start;
+	size_t prefix_length = offset - start;
+	char separator = start > 0 ? text[start - 1] : 0;
+
+	yyjson_mut_val* items = yyjson_mut_arr(document);
+
+	if (separator == '.' || separator == ':' || separator == '@')
+	{
+		ltls_TypeSet types = 0;
+		lt_AstNode* class_node = 0;
+
+		if (separator == '@')
+		{
+			lt_AstNode* receiver = ltls_index_receiver_at(&state.index, offset);
+			if (receiver && receiver->type == LT_AST_NODE_CLASS) class_node = receiver;
+			else if (receiver) types = ltls_index_type_of(&state.index, receiver);
+		}
+		else
+		{
+			lt_Token* token = token_ending_at(&state.analysis, start - 1);
+			if (token)
+			{
+				const ltls_Reference* reference = 0;
+				const ltls_Declaration* declaration =
+					ltls_index_resolve(&state.index, token->span.start, &reference);
+				types = declaration ? declaration->types : (reference ? reference->types : 0);
+			}
+
+			if (!types)
+			{
+				uint32_t begin = start - 1;
+				while (begin > 0 && is_name_character(text[begin - 1])) begin--;
+				if (begin + 1 < start)
+				{
+					const ltls_Declaration* declaration = declaration_named(&state.index,
+						text + begin, (size_t)(start - 1 - begin));
+					if (declaration) types = declaration->types;
+				}
+			}
+		}
+
+		const ltls_Declaration* members[512];
+		uint32_t count = class_node
+			? ltls_index_members(&state.index, class_node, members, 512)
+			: collect_members(&state.index, types, members, 512);
+		add_matching_members(document, &state.index, members, count, prefix, prefix_length, items);
+	}
+	else
+	{
+		const char* claimed[512];
+		uint32_t claimed_count = 0;
+
+		for (uint32_t i = 0; i < state.index.declaration_count; i++)
+		{
+			const ltls_Declaration* declaration = &state.index.declarations[i];
+			const char* name = ltls_index_token_text(&state.index, declaration->name);
+			if (!name || strncmp(name, prefix, prefix_length) != 0) continue;
+
+			if (declaration->external)
+			{
+				if (declaration->kind != LTLS_DECL_GLOBAL) continue;
+			}
+			else
+			{
+				if (declaration->kind == LTLS_DECL_FIELD || declaration->kind == LTLS_DECL_METHOD ||
+				    declaration->kind == LTLS_DECL_PROPERTY) continue;
+				if ((declaration->name->flags & LT_TOKEN_SYNTHETIC) && !declaration->from_doc) continue;
+				if ((declaration->kind == LTLS_DECL_LOCAL || declaration->kind == LTLS_DECL_PARAM) &&
+				    !scope_contains_offset(declaration->scope, offset)) continue;
+				if (declaration->name->span.start > offset) continue;
+			}
+
+			uint8_t duplicate = 0;
+			for (uint32_t j = 0; j < claimed_count; j++)
+				if (strcmp(claimed[j], name) == 0) { duplicate = 1; break; }
+			if (duplicate) continue;
+			if (claimed_count < 512) claimed[claimed_count++] = name;
+
+			yyjson_mut_val* item = completion_item(document, &state.index, declaration);
+			if (item) yyjson_mut_arr_add_val(items, item);
+		}
+
+		static const char* keywords[] = {
+			"and", "async", "await", "break", "class", "constructor", "else", "elseif",
+			"extends", "false", "fn", "for", "get", "global", "if", "import", "in",
+			"is", "isnt", "not", "null", "or", "override", "private", "public",
+			"return", "set", "super", "true", "type", "typeof", "var", "while", "with",
+			0
+		};
+		for (uint32_t i = 0; keywords[i]; i++)
+		{
+			if (strncmp(keywords[i], prefix, prefix_length) != 0) continue;
+
+			uint8_t duplicate = 0;
+			for (uint32_t j = 0; j < claimed_count; j++)
+				if (strcmp(claimed[j], keywords[i]) == 0) { duplicate = 1; break; }
+			if (duplicate) continue;
+			if (claimed_count < 512) claimed[claimed_count++] = keywords[i];
+
+			yyjson_mut_val* item = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_strcpy(document, item, "label", keywords[i]);
+			yyjson_mut_obj_add_int(document, item, "kind", 14);
+			yyjson_mut_arr_add_val(items, item);
+		}
+	}
+
+	yyjson_mut_val* result = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_bool(document, result, "isIncomplete", false);
+	yyjson_mut_obj_add_val(document, result, "items", items);
+
+	analysis_state_close(&state);
+	return result;
+}
+
+typedef struct {
+	char bracket;
+	uint32_t open;
+	uint32_t commas;
+} ltls_Bracket;
+
+static uint8_t find_active_call(const char* text, uint32_t offset, uint32_t* open, uint32_t* commas)
+{
+	ltls_Bracket stack[64];
+	uint32_t depth = 0;
+
+	for (uint32_t i = 0; i < offset; i++)
+	{
+		char c = text[i];
+		if (c == '"' || c == '\'')
+		{
+			for (i++; i < offset && text[i] != c; i++)
+				if (text[i] == '\\') i++;
+			continue;
+		}
+		if (c == ';')
+		{
+			while (i < offset && text[i] != '\n') i++;
+			continue;
+		}
+		if (c == '(' || c == '[' || c == '{')
+		{
+			if (depth < 64)
+			{
+				stack[depth].bracket = c;
+				stack[depth].open = i;
+				stack[depth].commas = 0;
+				depth++;
+			}
+		}
+		else if (c == ')' || c == ']' || c == '}')
+		{
+			if (depth) depth--;
+		}
+		else if (c == ',' && depth && stack[depth - 1].bracket == '(')
+		{
+			stack[depth - 1].commas++;
+		}
+	}
+
+	if (!depth || stack[depth - 1].bracket != '(') return 0;
+	*open = stack[depth - 1].open;
+	*commas = stack[depth - 1].commas;
+	return 1;
+}
+
+static uint32_t flush_parameter(char* current, uint32_t length, char names[][64],
+                                uint32_t count, uint32_t max)
+{
+	while (length && (current[length - 1] == ' ' || current[length - 1] == ']')) length--;
+
+	uint32_t leading = 0;
+	while (leading < length && (current[leading] == ' ' || current[leading] == '[')) leading++;
+
+	uint32_t size = length - leading;
+	if (size && count < max)
+	{
+		memcpy(names[count], current + leading, size);
+		names[count][size] = 0;
+		count++;
+	}
+	return count;
+}
+
+static uint32_t split_parameters(const char* label, char names[][64], uint32_t max)
+{
+	const char* open = strchr(label, '(');
+	const char* close = open ? strrchr(label, ')') : 0;
+	if (!open || !close || close < open) return 0;
+
+	uint32_t count = 0;
+	uint32_t length = 0;
+	char current[64];
+	uint8_t bracket = 0;
+
+	for (const char* cursor = open + 1; cursor < close; cursor++)
+	{
+		char c = *cursor;
+		if (c == '[') bracket++;
+		else if (c == ']' && bracket) bracket--;
+
+		if (c == ',' && !bracket)
+		{
+			count = flush_parameter(current, length, names, count, max);
+			length = 0;
+			continue;
+		}
+
+		if (length < sizeof(current) - 1) current[length++] = c;
+	}
+
+	return flush_parameter(current, length, names, count, max);
+}
+
+static const char* parameter_doc(const char* detail, const char* name)
+{
+	if (!detail || !name) return 0;
+
+	size_t name_length = strlen(name);
+	for (const char* cursor = detail; (cursor = strstr(cursor, "\n- ")) != 0; cursor += 3)
+	{
+		const char* entry = cursor + 3;
+		if (strncmp(entry, name, name_length) != 0 || entry[name_length] != ':') continue;
+		const char* value = entry + name_length + 1;
+		while (*value == ' ') value++;
+		return *value ? value : 0;
+	}
+	return 0;
+}
+
+static yyjson_mut_val* build_signature_help(yyjson_mut_doc* document, void* context)
+{
+	ltls_PositionContext* position = context;
+	if (!position->document) return 0;
+
+	ltls_AnalysisState state;
+	analysis_state_open(&state, position->document);
+	if (!state.vm) return 0;
+
+	const char* text = position->document->text;
+	uint32_t offset = position_to_offset(&state.lines, text, position->line, position->character);
+	uint32_t open = 0, commas = 0;
+
+	yyjson_mut_val* result = 0;
+	if (find_active_call(text, offset, &open, &commas))
+	{
+		uint32_t callee_end = open;
+		while (callee_end > 0 && (text[callee_end - 1] == ' ' || text[callee_end - 1] == '\t')) callee_end--;
+
+		lt_Token* token = token_ending_at(&state.analysis, callee_end);
+		const ltls_Declaration* declaration = token
+			? ltls_index_resolve(&state.index, token->span.start, 0) : 0;
+
+		if (declaration)
+		{
+			char* signature = ltls_declaration_signature(&state.index, declaration, 0);
+			if (signature)
+			{
+				char names[32][64];
+				uint32_t count = split_parameters(signature, names, 32);
+
+				yyjson_mut_val* parameters = yyjson_mut_arr(document);
+				for (uint32_t i = 0; i < count; i++)
+				{
+					yyjson_mut_val* parameter = yyjson_mut_obj(document);
+					yyjson_mut_obj_add_strcpy(document, parameter, "label", names[i]);
+					const char* doc = parameter_doc(declaration->detail, names[i]);
+					if (doc)
+					{
+						char text[256];
+						size_t length = 0;
+						while (doc[length] && doc[length] != '\n' && length < sizeof(text) - 1)
+							text[length] = doc[length], length++;
+						text[length] = 0;
+						yyjson_mut_obj_add_strcpy(document, parameter, "documentation", text);
+					}
+					yyjson_mut_arr_add_val(parameters, parameter);
+				}
+
+				yyjson_mut_val* entry = yyjson_mut_obj(document);
+				yyjson_mut_obj_add_strcpy(document, entry, "label", signature);
+				yyjson_mut_obj_add_val(document, entry, "parameters", parameters);
+
+				yyjson_mut_val* signatures = yyjson_mut_arr(document);
+				yyjson_mut_arr_add_val(signatures, entry);
+
+				result = yyjson_mut_obj(document);
+				yyjson_mut_obj_add_val(document, result, "signatures", signatures);
+				yyjson_mut_obj_add_int(document, result, "activeSignature", 0);
+				uint32_t active = count ? (commas < count ? commas : count - 1) : commas;
+				yyjson_mut_obj_add_int(document, result, "activeParameter", active);
+
+				free(signature);
+			}
+		}
+	}
+
+	analysis_state_close(&state);
+	return result;
 }
 
 static void handle_message(ltls_Documents* documents, char* body, size_t length,
@@ -843,6 +1305,19 @@ static void handle_message(ltls_Documents* documents, char* body, size_t length,
 
 		if (id)
 			send_message(id, method[13] == 'h' ? build_hover : build_definition, &context);
+	}
+	else if (strcmp(method, "textDocument/completion") == 0 || strcmp(method, "textDocument/signatureHelp") == 0)
+	{
+		yyjson_val* document = params ? yyjson_obj_get(params, "textDocument") : 0;
+		const char* uri = object_string(document, "uri");
+		yyjson_val* position = params ? yyjson_obj_get(params, "position") : 0;
+		ltls_PositionContext context;
+		context.document = uri ? ltls_documents_find(documents, uri) : 0;
+		context.line = (uint32_t)object_int(position, "line");
+		context.character = (uint32_t)object_int(position, "character");
+
+		if (id)
+			send_message(id, method[13] == 'c' ? build_completion : build_signature_help, &context);
 	}
 	else if (strcmp(method, "textDocument/documentSymbol") == 0)
 	{

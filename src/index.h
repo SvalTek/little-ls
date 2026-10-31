@@ -100,6 +100,8 @@ typedef struct {
 
 	ltls_TypeSetNode** allocations;
 	uint32_t allocation_count;
+
+	const lt_Analysis* analysis; /* borrowed from ltls_index_build */
 } ltls_Index;
 
 /* Walks the analysis tree once. Read-only: scopes are not modified. */
@@ -118,6 +120,17 @@ const char* ltls_index_token_text(const ltls_Index* index, const lt_Token* token
 /* Member/field lookup by class node or table literal node. */
 const ltls_Declaration* ltls_index_member(const ltls_Index* index, lt_AstNode* class_node, lt_Token* token);
 const ltls_Declaration* ltls_index_table_field(const ltls_Index* index, lt_AstNode* table, lt_Token* token);
+
+/* Members visible on a class (including superclasses, child first) or a table,
+   deduplicated by name. Returns the number written, capped at max. */
+uint32_t ltls_index_members(const ltls_Index* index, lt_AstNode* class_node,
+                            const ltls_Declaration** out, uint32_t max);
+uint32_t ltls_index_table_members(const ltls_Index* index, lt_AstNode* table,
+                                  const ltls_Declaration** out, uint32_t max);
+
+/* The innermost `with` receiver expression or enclosing class node at offset,
+   or NULL. Used for `@` completion. */
+lt_AstNode* ltls_index_receiver_at(const ltls_Index* index, uint32_t offset);
 
 /* Flow type recorded for an expression occurrence, or NULL. */
 ltls_TypeSet ltls_index_type_of(const ltls_Index* index, lt_AstNode* node);

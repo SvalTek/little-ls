@@ -548,6 +548,88 @@ async function main() {
   const tableReturn = await waitFor((message) => message.id === 52, "table return hover");
   assert.match(tableReturn.result.contents.value, /var r: table/);
 
+  const memberDocUri = "file:///test/memberdoc.little";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: memberDocUri, languageId: "little", version: 1, text: "class Provider {\n  name\n  test() {\n    return 1\n  }\n}\nvar p = Provider()\np.\n" } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === memberDocUri, "member doc diagnostics");
+
+  send({ jsonrpc: "2.0", id: 53, method: "textDocument/completion", params: { textDocument: { uri: memberDocUri }, position: { line: 7, character: 2 } } });
+  const memberCompletion = await waitFor((message) => message.id === 53, "member completion");
+  const memberLabels = memberCompletion.result.items.map((item) => item.label);
+  assert.ok(memberLabels.includes("name"), "field completion missing");
+  assert.ok(memberLabels.includes("test"), "method completion missing");
+  assert.equal(memberCompletion.result.items.find((item) => item.label === "name").kind, 5);
+
+  const moduleDocUri = "file:///test/moduledoc.little";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: moduleDocUri, languageId: "little", version: 1, text: "string.\n" } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === moduleDocUri, "module doc diagnostics");
+
+  send({ jsonrpc: "2.0", id: 54, method: "textDocument/completion", params: { textDocument: { uri: moduleDocUri }, position: { line: 0, character: 7 } } });
+  const moduleCompletion = await waitFor((message) => message.id === 54, "module completion");
+  const formatItem = moduleCompletion.result.items.find((item) => item.label === "format");
+  assert.ok(formatItem, "string.format completion missing");
+  assert.match(formatItem.detail, /fn string\.format/);
+
+  const generalDocUri = "file:///test/generaldoc.little";
+  const generalText = "class Provider {\n  name\n}\nvar p = Provider()\nvar t = 1\n\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: generalDocUri, languageId: "little", version: 1, text: generalText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === generalDocUri, "general doc diagnostics");
+
+  send({ jsonrpc: "2.0", id: 55, method: "textDocument/completion", params: { textDocument: { uri: generalDocUri }, position: { line: 5, character: 0 } } });
+  const generalCompletion = await waitFor((message) => message.id === 55, "general completion");
+  const generalLabels = generalCompletion.result.items.map((item) => item.label);
+  for (const label of ["Provider", "p", "t", "string", "fn", "with"])
+    assert.ok(generalLabels.includes(label), `general completion missing ${label}`);
+
+  const callDocUri = "file:///test/calldoc.little";
+  const callText = "fn add(a, b) {\n  return a + b\n}\nvar t = string.format(\"%d\", 1)\nadd(1, )\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: callDocUri, languageId: "little", version: 1, text: callText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === callDocUri, "call doc diagnostics");
+
+  send({ jsonrpc: "2.0", id: 56, method: "textDocument/signatureHelp", params: { textDocument: { uri: callDocUri }, position: { line: 3, character: 25 } } });
+  const stdSignature = await waitFor((message) => message.id === 56, "std signature help");
+  assert.equal(stdSignature.result.signatures[0].label, "fn string.format(template, ...)");
+  assert.equal(stdSignature.result.signatures[0].parameters[0].label, "template");
+  assert.equal(stdSignature.result.activeParameter, 0);
+
+  send({ jsonrpc: "2.0", id: 57, method: "textDocument/signatureHelp", params: { textDocument: { uri: callDocUri }, position: { line: 3, character: 28 } } });
+  const secondSignature = await waitFor((message) => message.id === 57, "second parameter signature");
+  assert.equal(secondSignature.result.activeParameter, 1);
+
+  send({ jsonrpc: "2.0", id: 58, method: "textDocument/signatureHelp", params: { textDocument: { uri: callDocUri }, position: { line: 4, character: 7 } } });
+  const userSignature = await waitFor((message) => message.id === 58, "user signature help");
+  assert.equal(userSignature.result.signatures[0].label, "fn add(a, b)");
+  assert.deepEqual(userSignature.result.signatures[0].parameters.map((parameter) => parameter.label), ["a", "b"]);
+  assert.equal(userSignature.result.activeParameter, 1);
+
+  const withDocUri = "file:///test/withdoc.little";
+  const withText = ";; @class Config\n;; @field string baseUrl\n;;\n;; @param Config config\nfn run(config) {\n  with config {\n    @ba\n  }\n}\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: withDocUri, languageId: "little", version: 1, text: withText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === withDocUri, "with doc diagnostics");
+
+  send({ jsonrpc: "2.0", id: 59, method: "textDocument/completion", params: { textDocument: { uri: withDocUri }, position: { line: 6, character: 7 } } });
+  const withCompletion = await waitFor((message) => message.id === 59, "with completion");
+  assert.ok(withCompletion.result.items.some((item) => item.label === "baseUrl"), "@ completion missing baseUrl");
+
   const chainUri = "file:///test/chain.little";
   const chainSource = [
     "class A {",
