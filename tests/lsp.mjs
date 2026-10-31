@@ -507,6 +507,95 @@ async function main() {
   const printDefinition = await waitFor((message) => message.id === 41, "print definition");
   assert.equal(printDefinition.result, null);
 
+  const chainUri = "file:///test/chain.little";
+  const chainSource = [
+    "class A {",
+    "  aValue",
+    "  aMethod() {",
+    "    return 1",
+    "  }",
+    "}",
+    "class B extends A {",
+    "}",
+    "class C extends B {",
+    "}",
+    "var c = C()",
+    "io.print(c.aValue)",
+    "io.print(c:aMethod())",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: chainUri, languageId: "little", version: 1, text: chainSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === chainUri, "chain diagnostics");
+
+  send({ jsonrpc: "2.0", id: 42, method: "textDocument/hover", params: { textDocument: { uri: chainUri }, position: { line: 11, character: 12 } } });
+  const chainField = await waitFor((message) => message.id === 42, "chain field hover");
+  assert.match(chainField.result.contents.value, /field aValue/);
+
+  send({ jsonrpc: "2.0", id: 43, method: "textDocument/hover", params: { textDocument: { uri: chainUri }, position: { line: 12, character: 12 } } });
+  const chainMethod = await waitFor((message) => message.id === 43, "chain method hover");
+  assert.match(chainMethod.result.contents.value, /fn aMethod\(\)/);
+
+  const overrideUri = "file:///test/override.little";
+  const overrideSource = [
+    "class Base {",
+    "  pick() {",
+    "    return 1",
+    "  }",
+    "}",
+    "class Child extends Base {",
+    "  pick() {",
+    "    return 2",
+    "  }",
+    "}",
+    "var o = Child()",
+    "io.print(o:pick())",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: overrideUri, languageId: "little", version: 1, text: overrideSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === overrideUri, "override diagnostics");
+
+  send({ jsonrpc: "2.0", id: 44, method: "textDocument/definition", params: { textDocument: { uri: overrideUri }, position: { line: 11, character: 12 } } });
+  const overrideDefinition = await waitFor((message) => message.id === 44, "override definition");
+  assert.equal(overrideDefinition.result.range.start.line, 6);
+
+  const shapeBaseUri = "file:///test/shapebase.little";
+  const shapeBaseSource = [
+    "class Base {",
+    "  value",
+    "}",
+    ";; @class Extras : Base",
+    ";; @field number extra",
+    "",
+    ";; @param Extras options",
+    "fn use(options) {",
+    "  io.print(options.value)",
+    "  io.print(options.extra)",
+    "}",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: shapeBaseUri, languageId: "little", version: 1, text: shapeBaseSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === shapeBaseUri, "shape base diagnostics");
+
+  send({ jsonrpc: "2.0", id: 45, method: "textDocument/hover", params: { textDocument: { uri: shapeBaseUri }, position: { line: 8, character: 19 } } });
+  const inheritedShapeField = await waitFor((message) => message.id === 45, "inherited shape field");
+  assert.match(inheritedShapeField.result.contents.value, /field value/);
+
+  send({ jsonrpc: "2.0", id: 46, method: "textDocument/hover", params: { textDocument: { uri: shapeBaseUri }, position: { line: 9, character: 19 } } });
+  const ownShapeField = await waitFor((message) => message.id === 46, "own shape field");
+  assert.match(ownShapeField.result.contents.value, /field extra: number/);
+
   send({ jsonrpc: "2.0", id: 37, method: "shutdown" });
   const finalShutdown = await waitFor((message) => message.id === 37, "shutdown");
   assert.equal(finalShutdown.result, null);
