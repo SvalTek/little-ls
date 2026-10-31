@@ -11,6 +11,7 @@
    repeats until the weak maps and function returns stop growing, which settles
    forward references and recursion. */
 #include "index.h"
+#include "docs.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,7 @@
 
 typedef struct {
 	ltls_Index* index;
+	const lt_Analysis* analysis;
 	ltls_TypeSet* env;
 	lt_Scope* frame;
 	lt_AstNode* function;
@@ -55,6 +57,94 @@ static ltls_Reference* reference_for_node(const ltls_Index* index, lt_AstNode* n
 		if (reference->node == node && reference->member == member) return reference;
 	}
 	return 0;
+}
+
+static lt_AstNode* find_class(const ltls_Index* index, const char* name)
+{
+	for (uint32_t i = 0; i < index->declaration_count; i++)
+	{
+		const ltls_Declaration* declaration = &index->declarations[i];
+		if (declaration->kind != LTLS_DECL_CLASS || !declaration->node) continue;
+
+		const char* candidate = token_text(index, declaration->name);
+		if (candidate && strcmp(candidate, name) == 0) return declaration->node;
+	}
+	return 0;
+}
+
+static ltls_TypeSet annotation_segment(ltls_Context* context, char* text)
+{
+	while (*text == ' ' || *text == '\t') text++;
+	size_t length = strlen(text);
+	while (length && (text[length - 1] == ' ' || text[length - 1] == '\t')) text[--length] = 0;
+	if (length == 0) return 0;
+
+	if (strcmp(text, "?") == 0 || strcmp(text, "any") == 0 || strcmp(text, "unknown") == 0) return 0;
+
+	uint8_t kind = LTLS_TYPE_UNKNOWN;
+	lt_AstNode* node = 0;
+
+	if (strcmp(text, "number") == 0) kind = LTLS_TYPE_NUMBER;
+	else if (strcmp(text, "string") == 0) kind = LTLS_TYPE_STRING;
+	else if (strcmp(text, "bool") == 0 || strcmp(text, "boolean") == 0) kind = LTLS_TYPE_BOOL;
+	else if (strcmp(text, "nil") == 0 || strcmp(text, "null") == 0) kind = LTLS_TYPE_NULL;
+	else if (strcmp(text, "table") == 0) kind = LTLS_TYPE_TABLE;
+	else if (strcmp(text, "array") == 0) kind = LTLS_TYPE_ARRAY;
+	else if (strcmp(text, "fn") == 0 || strcmp(text, "function") == 0) kind = LTLS_TYPE_FUNCTION;
+	else
+	{
+		lt_AstNode* klass = find_class(context->index, text);
+		if (!klass) return 0;
+		kind = LTLS_TYPE_INSTANCE;
+		node = klass;
+	}
+
+	return ltls_type_add(context->index, 0, kind, node);
+}
+
+/* `A | B`, `?`, class names, primitives. */
+static ltls_TypeSet annotation_type(ltls_Context* context, const char* type)
+{
+	if (!type) return 0;
+
+	char buffer[160];
+	size_t length = strlen(type);
+	if (length == 0 || length >= sizeof(buffer)) return 0;
+	memcpy(buffer, type, length + 1);
+
+	ltls_TypeSet result = 0;
+	char* segment = buffer;
+	for (char* position = buffer; ; position++)
+	{
+		if (*position != '|' && *position != 0) continue;
+
+		char saved = *position;
+		*position = 0;
+		result = ltls_type_union(context->index, result, annotation_segment(context, segment));
+		if (saved == 0) break;
+		segment = position + 1;
+	}
+	return result;
+}
+
+/* `@type T` and `@class T` above a line describe the annotated value. */
+static ltls_TypeSet annotated_type(ltls_Context* context, uint32_t line)
+{
+	ltls_Doc doc;
+	if (!context->analysis || !ltls_doc_for_line(&context->analysis->tokens, line, &doc)) return 0;
+
+	ltls_TypeSet result = 0;
+	for (uint32_t i = 0; i < doc.tag_count; i++)
+	{
+		const char* tag = doc.tags[i];
+		if (strncmp(tag, "@type ", 6) == 0)
+			result = ltls_type_union(context->index, result, annotation_type(context, tag + 6));
+		else if (strncmp(tag, "@class ", 7) == 0)
+			result = ltls_type_union(context->index, result, annotation_type(context, tag + 7));
+	}
+
+	ltls_doc_free(&doc);
+	return result;
 }
 
 static uint8_t declaration_is_captured(const ltls_Declaration* declaration)
@@ -161,6 +251,43 @@ static ltls_TypeSet member_type(ltls_Context* context, ltls_TypeSet receiver, lt
 	return result;
 }
 
+static void apply_function_docs(ltls_Context* context, lt_AstNode* fn)
+{
+	ltls_Doc doc;
+	if (!context->analysis || !ltls_doc_for_line(&context->analysis->tokens, fn->loc.line, &doc)) return;
+
+	for (uint32_t i = 0; i < doc.param_count; i++)
+	{
+		ltls_TypeSet type = annotation_type(context, doc.params[i].type);
+		if (!type) continue;
+
+		for (uint8_t a = 0; a <= LT_MAX_FUNCTION_PARAMS; a++)
+		{
+			lt_Token* argument = fn->fn.args[a];
+			if (!argument) break;
+
+			const char* name = token_text(context->index, argument);
+			if (!name || strcmp(name, doc.params[i].name) != 0) continue;
+
+			ltls_Declaration* declaration = declaration_for_token(context->index, argument);
+			if (declaration) write_declaration(context, declaration, type);
+			break;
+		}
+	}
+
+	for (uint32_t i = 0; i < doc.return_count; i++)
+	{
+		ltls_TypeSet type = annotation_type(context, doc.returns[i].type);
+		if (!type) continue;
+
+		ltls_TypeSet before = ltls_index_returns(context->index, fn);
+		ltls_TypeSet after = ltls_index_add_return(context->index, fn, type);
+		if (!ltls_type_equals(before, after)) context->changed = 1;
+	}
+
+	ltls_doc_free(&doc);
+}
+
 static ltls_TypeSet analyze_function(ltls_Context* context, lt_AstNode* fn)
 {
 	ltls_TypeSet* saved_env = context->env;
@@ -171,6 +298,8 @@ static ltls_TypeSet analyze_function(ltls_Context* context, lt_AstNode* fn)
 		sizeof(ltls_TypeSet));
 	context->frame = fn->fn.scope ? fn->fn.scope->frame : saved_frame;
 	context->function = fn;
+
+	apply_function_docs(context, fn);
 
 	analyze_body(context, &fn->fn.body);
 
@@ -438,6 +567,13 @@ static void analyze_class(ltls_Context* context, lt_AstNode* node)
 		ltls_Declaration* declaration = (ltls_Declaration*)ltls_index_member(context->index, node, member->name);
 		if (!declaration) continue;
 
+		ltls_TypeSet annotated = annotated_type(context, member->name->line);
+		if (annotated && member->type == LT_CLASS_FIELD)
+		{
+			write_declaration(context, declaration, annotated);
+			continue;
+		}
+
 		/* A field's value is the return of its synthesized initializer. */
 		if (member->type == LT_CLASS_FIELD && member->value->type == LT_AST_NODE_FN)
 			write_declaration(context, declaration, ltls_index_returns(context->index, member->value));
@@ -458,6 +594,9 @@ static void analyze_statement(ltls_Context* context, lt_AstNode* node)
 
 	case LT_AST_NODE_DECLARE: {
 		ltls_TypeSet type = analyze_expression(context, node->declare.expr);
+		ltls_TypeSet annotated = annotated_type(context, node->loc.line);
+		if (annotated) type = annotated;
+
 		ltls_Declaration* declaration = declaration_for_token(context->index, node->declare.identifier);
 		if (declaration)
 		{
@@ -520,6 +659,7 @@ void ltls_types_build(ltls_Index* index, const lt_Analysis* analysis)
 		ltls_Context context;
 		memset(&context, 0, sizeof(context));
 		context.index = index;
+		context.analysis = analysis;
 		context.env = calloc(index->declaration_count ? index->declaration_count : 1, sizeof(ltls_TypeSet));
 		context.frame = root->chunk.scope ? root->chunk.scope->frame : 0;
 

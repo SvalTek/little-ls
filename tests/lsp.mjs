@@ -344,8 +344,77 @@ async function main() {
   const implicitHover = await waitFor((message) => message.id === 22, "implicit field hover");
   assert.match(implicitHover.result.contents.value, /field label/);
 
-  send({ jsonrpc: "2.0", id: 23, method: "shutdown" });
-  const shutdown = await waitFor((message) => message.id === 23, "shutdown");
+  const annotatedUri = "file:///test/annotated.little";
+  const annotatedSource = [
+    "class Box {",
+    "  value",
+    "}",
+    ";; @param Box box",
+    "fn use(box) {",
+    "  with box {",
+    "    io.print(@value)",
+    "  }",
+    "}",
+    ";; @type Box",
+    "var x = make()",
+    "io.print(x.value)",
+    ";; @return string",
+    "fn label() {",
+    "}",
+    "var s = label()",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: annotatedUri, languageId: "little", version: 1, text: annotatedSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === annotatedUri, "annotated diagnostics");
+
+  send({ jsonrpc: "2.0", id: 24, method: "textDocument/hover", params: { textDocument: { uri: annotatedUri }, position: { line: 6, character: 15 } } });
+  const annotatedMember = await waitFor((message) => message.id === 24, "annotated member hover");
+  assert.match(annotatedMember.result.contents.value, /field value/);
+
+  send({ jsonrpc: "2.0", id: 25, method: "textDocument/hover", params: { textDocument: { uri: annotatedUri }, position: { line: 10, character: 4 } } });
+  const annotatedVariable = await waitFor((message) => message.id === 25, "annotated variable hover");
+  assert.match(annotatedVariable.result.contents.value, /var x: Box/);
+
+  send({ jsonrpc: "2.0", id: 26, method: "textDocument/hover", params: { textDocument: { uri: annotatedUri }, position: { line: 15, character: 4 } } });
+  const annotatedReturn = await waitFor((message) => message.id === 26, "annotated return hover");
+  assert.match(annotatedReturn.result.contents.value, /var s: string/);
+
+  const inheritedUri = "file:///test/inherited.little";
+  const inheritedSource = [
+    "class Base {",
+    "  baseValue",
+    "  baseMethod() {",
+    "    return 1",
+    "  }",
+    "}",
+    "class Child extends Base {",
+    "}",
+    "var c = Child()",
+    "io.print(c.baseValue)",
+    "io.print(c:baseMethod())",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: inheritedUri, languageId: "little", version: 1, text: inheritedSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === inheritedUri, "inherited diagnostics");
+
+  send({ jsonrpc: "2.0", id: 28, method: "textDocument/hover", params: { textDocument: { uri: inheritedUri }, position: { line: 9, character: 12 } } });
+  const inheritedField = await waitFor((message) => message.id === 28, "inherited field hover");
+  assert.match(inheritedField.result.contents.value, /field baseValue/);
+
+  send({ jsonrpc: "2.0", id: 29, method: "textDocument/hover", params: { textDocument: { uri: inheritedUri }, position: { line: 10, character: 12 } } });
+  const inheritedMethod = await waitFor((message) => message.id === 29, "inherited method hover");
+  assert.match(inheritedMethod.result.contents.value, /fn baseMethod\(\)/);
+
+  send({ jsonrpc: "2.0", id: 30, method: "shutdown" });
+  const shutdown = await waitFor((message) => message.id === 30, "shutdown");
   assert.equal(shutdown.result, null);
 
   send({ jsonrpc: "2.0", method: "exit" });

@@ -504,17 +504,44 @@ static const ltls_Declaration* resolve_global(const ltls_Index* index, lt_Token*
 	return 0;
 }
 
-static const ltls_Declaration* resolve_member(const ltls_Index* index, lt_AstNode* class_node, lt_Token* token)
+static lt_AstNode* superclass_node(const ltls_Index* index, lt_AstNode* class_node)
 {
-	if (!class_node) return 0;
+	if (!class_node || class_node->type != LT_AST_NODE_CLASS) return 0;
+
+	lt_Token* superclass = class_node->class_decl.superclass;
+	if (!superclass) return 0;
+
+	const char* name = token_text(index, superclass);
+	if (!name) return 0;
 
 	for (uint32_t i = 0; i < index->declaration_count; i++)
 	{
 		const ltls_Declaration* declaration = &index->declarations[i];
-		if (declaration->node != class_node) continue;
-		if (declaration->kind < LTLS_DECL_FIELD || declaration->kind > LTLS_DECL_PROPERTY) continue;
-		if (declaration->name->idx == token->idx) return declaration;
+		if (declaration->kind != LTLS_DECL_CLASS || !declaration->node) continue;
+
+		const char* candidate = token_text(index, declaration->name);
+		if (candidate && strcmp(candidate, name) == 0) return declaration->node;
 	}
+	return 0;
+}
+
+static const ltls_Declaration* resolve_member(const ltls_Index* index, lt_AstNode* class_node, lt_Token* token)
+{
+	if (!class_node) return 0;
+
+	for (uint8_t depth = 0; class_node && depth < 8; depth++)
+	{
+		for (uint32_t i = 0; i < index->declaration_count; i++)
+		{
+			const ltls_Declaration* declaration = &index->declarations[i];
+			if (declaration->node != class_node) continue;
+			if (declaration->kind < LTLS_DECL_FIELD || declaration->kind > LTLS_DECL_PROPERTY) continue;
+			if (declaration->name->idx == token->idx) return declaration;
+		}
+
+		class_node = superclass_node(index, class_node);
+	}
+
 	return 0;
 }
 
