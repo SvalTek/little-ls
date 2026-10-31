@@ -773,6 +773,13 @@ static const ltls_Declaration* declaration_for_span(const ltls_Index* index, lt_
 	return 0;
 }
 
+static const ltls_Declaration* declaration_for_token(const ltls_Index* index, const lt_Token* token)
+{
+	for (uint32_t i = 0; i < index->declaration_count; i++)
+		if (index->declarations[i].name == token) return &index->declarations[i];
+	return 0;
+}
+
 static const ltls_Declaration* resolve_lexical(const ltls_Index* index, lt_Scope* scope, lt_Token* token)
 {
 	for (lt_Scope* current = scope; current; current = current->last)
@@ -782,7 +789,8 @@ static const ltls_Declaration* resolve_lexical(const ltls_Index* index, lt_Scope
 			lt_Token* local = AT(lt_Token, current->locals, i);
 			if (local->idx != token->idx) continue;
 
-			const ltls_Declaration* declaration = declaration_for_span(index, local->span);
+			const ltls_Declaration* declaration = declaration_for_token(index, local);
+			if (!declaration) declaration = declaration_for_span(index, local->span);
 			/* The parser only sees locals declared before the reference. */
 			if (declaration && declaration->name->span.start <= token->span.start) return declaration;
 		}

@@ -742,6 +742,49 @@ async function main() {
   const withAtLabels = withAtMembers.result.items.map((item) => item.label);
   assert.ok(withAtLabels.includes("remote"), "@ inside with lost the receiver");
   assert.ok(!withAtLabels.includes("baseUrl"), "@ inside with used the class");
+
+  /* An incomplete expression immediately before a valid statement is a normal
+     editing state: recovery must keep the following statement parseable. */
+  const combinedUri = "file:///test/combined.little";
+  const combinedText = [
+    ";; @class Opts",
+    ";; @field string remote",
+    ";;",
+    "class Provider {",
+    "  baseUrl",
+    "  ;; @param Opts opts",
+    "  constructor(opts) {",
+    "    with opts {",
+    "      this.",
+    "      @r",
+    "    }",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: combinedUri, languageId: "little", version: 1, text: combinedText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === combinedUri, "combined diagnostics");
+
+  send({ jsonrpc: "2.0", id: 67, method: "textDocument/completion", params: { textDocument: { uri: combinedUri }, position: { line: 9, character: 8 } } });
+  const combinedAt = await waitFor((message) => message.id === 67, "combined at completion");
+  assert.ok(combinedAt.result.items.some((item) => item.label === "remote"), "dangling this. consumed the next statement");
+
+  const recoveryUri = "file:///test/recovery.little";
+  const recoveryText = "fn f() {\n  class Foo\n  var ok = 1\n  io.print(ok)\n}\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: recoveryUri, languageId: "little", version: 1, text: recoveryText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === recoveryUri, "recovery diagnostics");
+
+  send({ jsonrpc: "2.0", id: 68, method: "textDocument/hover", params: { textDocument: { uri: recoveryUri }, position: { line: 2, character: 7 } } });
+  const recovered = await waitFor((message) => message.id === 68, "recovered statement hover");
+  assert.match(recovered.result.contents.value, /var ok: number/);
   const chainUri = "file:///test/chain.little";
   const chainSource = [
     "class A {",
