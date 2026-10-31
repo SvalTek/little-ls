@@ -28,12 +28,7 @@ typedef struct {
 	uint8_t changed;
 } ltls_Context;
 
-static const char* token_text(const ltls_Index* index, const lt_Token* token)
-{
-	if (!token) return 0;
-	if (token->idx >= index->tokens->identifier_buffer.length) return 0;
-	return AT(lt_Identifier, index->tokens->identifier_buffer, token->idx)->name;
-}
+#define token_text ltls_index_token_text
 
 static uint32_t declaration_index(const ltls_Index* index, const ltls_Declaration* declaration)
 {
@@ -127,7 +122,7 @@ static ltls_TypeSet annotation_type(ltls_Context* context, const char* type)
 	return result;
 }
 
-/* `@type T` and `@class T` above a line describe the annotated value. */
+/* `@type T` above a line describes the annotated value; `@class` defines. */
 static ltls_TypeSet annotated_type(ltls_Context* context, uint32_t line)
 {
 	ltls_Doc doc;
@@ -139,8 +134,6 @@ static ltls_TypeSet annotated_type(ltls_Context* context, uint32_t line)
 		const char* tag = doc.tags[i];
 		if (strncmp(tag, "@type ", 6) == 0)
 			result = ltls_type_union(context->index, result, annotation_type(context, tag + 6));
-		else if (strncmp(tag, "@class ", 7) == 0)
-			result = ltls_type_union(context->index, result, annotation_type(context, tag + 7));
 	}
 
 	ltls_doc_free(&doc);
@@ -648,6 +641,22 @@ static void analyze_body(ltls_Context* context, lt_Buffer* body)
 		analyze_statement(context, *AT(lt_AstNode*, *body, i));
 }
 
+static void apply_declaration_annotations(ltls_Context* context)
+{
+	for (uint32_t i = 0; i < context->index->declaration_count; i++)
+	{
+		ltls_Declaration* declaration = &context->index->declarations[i];
+		if (!declaration->annotation) continue;
+
+		ltls_TypeSet type = annotation_type(context, declaration->annotation);
+		if (!type) continue;
+
+		ltls_TypeSet before = declaration->types;
+		declaration->types = ltls_type_union(context->index, declaration->types, type);
+		if (!ltls_type_equals(before, declaration->types)) context->changed = 1;
+	}
+}
+
 void ltls_types_build(ltls_Index* index, const lt_Analysis* analysis)
 {
 	if (!analysis->parser.root) return;
@@ -663,6 +672,7 @@ void ltls_types_build(ltls_Index* index, const lt_Analysis* analysis)
 		context.env = calloc(index->declaration_count ? index->declaration_count : 1, sizeof(ltls_TypeSet));
 		context.frame = root->chunk.scope ? root->chunk.scope->frame : 0;
 
+		apply_declaration_annotations(&context);
 		analyze_body(&context, &root->chunk.body);
 
 		free(context.env);

@@ -531,6 +531,36 @@ static void markdown_append_docs(ltls_Markdown* markdown, const ltls_Doc* docs)
 		markdown_append(markdown, "\n");
 	}
 
+	if (docs->class_name)
+	{
+		markdown_append(markdown, "\nclass ");
+		markdown_append(markdown, docs->class_name);
+		if (docs->class_base)
+		{
+			markdown_append(markdown, " : ");
+			markdown_append(markdown, docs->class_base);
+		}
+	}
+
+	for (uint32_t i = 0; i < docs->field_count; i++)
+	{
+		const ltls_DocField* field = &docs->fields[i];
+		markdown_append(markdown, "\n- `");
+		markdown_append(markdown, field->name);
+		markdown_append(markdown, "`");
+		if (field->type)
+		{
+			markdown_append(markdown, " *");
+			markdown_append(markdown, field->type);
+			markdown_append(markdown, "*");
+		}
+		if (field->description && field->description[0])
+		{
+			markdown_append(markdown, " — ");
+			markdown_append(markdown, field->description);
+		}
+	}
+
 	for (uint32_t i = 0; i < docs->param_count; i++)
 	{
 		const ltls_DocParam* param = &docs->params[i];
@@ -613,6 +643,11 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 		markdown_append(&markdown, signature ? signature : "");
 		markdown_append(&markdown, "\n```\n");
 		if (has_docs) markdown_append_docs(&markdown, &docs);
+		if (declaration->detail)
+		{
+			markdown_append(&markdown, "\n\n");
+			markdown_append(&markdown, declaration->detail);
+		}
 		if (!markdown.text) markdown_append(&markdown, "");
 
 		result = yyjson_mut_obj(document);

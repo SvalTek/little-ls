@@ -45,6 +45,8 @@ typedef struct {
 	lt_AstNode* node;
 	const lt_ClassMember* member;
 	ltls_TypeSet types;
+	char* annotation;   /* field type text from a doc shape */
+	char* detail;       /* doc description for synthetic members */
 	uint8_t kind;
 	uint8_t is_global;
 } ltls_Declaration;
@@ -65,6 +67,11 @@ typedef struct {
 } ltls_TypedNode;
 
 typedef struct {
+	const lt_Token* token;
+	char* text;
+} ltls_TokenText;
+
+typedef struct {
 	const lt_Tokenizer* tokens;
 	const char* source;
 	ltls_Declaration* declarations;
@@ -77,6 +84,14 @@ typedef struct {
 	uint32_t node_type_count;
 	ltls_TypedNode* function_returns;
 	uint32_t function_return_count;
+
+	/* text for synthetic tokens created from doc shapes */
+	ltls_TokenText* token_texts;
+	uint32_t token_text_count;
+	lt_Token** token_allocations;
+	uint32_t token_allocation_count;
+	lt_AstNode** node_allocations;
+	uint32_t node_allocation_count;
 
 	ltls_TypeSetNode** allocations;
 	uint32_t allocation_count;
@@ -91,6 +106,9 @@ void ltls_types_build(ltls_Index* index, const lt_Analysis* analysis);
 
 /* Resolves a name through the lexical chain, then globals. */
 const ltls_Declaration* ltls_index_lookup(const ltls_Index* index, lt_Scope* scope, lt_Token* token);
+
+/* Token name, including synthetic doc-shape tokens. */
+const char* ltls_index_token_text(const ltls_Index* index, const lt_Token* token);
 
 /* Member/field lookup by class node or table literal node. */
 const ltls_Declaration* ltls_index_member(const ltls_Index* index, lt_AstNode* class_node, lt_Token* token);

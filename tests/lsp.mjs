@@ -413,8 +413,44 @@ async function main() {
   const inheritedMethod = await waitFor((message) => message.id === 29, "inherited method hover");
   assert.match(inheritedMethod.result.contents.value, /fn baseMethod\(\)/);
 
-  send({ jsonrpc: "2.0", id: 30, method: "shutdown" });
-  const shutdown = await waitFor((message) => message.id === 30, "shutdown");
+  const shapeUri = "file:///test/shape.little";
+  const shapeSource = [
+    ";; @class Options",
+    ";; @field boolean foo should we enable foo?",
+    ";; @field string name a label",
+    "",
+    ";; Configure the thing.",
+    ";; @param Options options [{ foo: true }] method options",
+    "fn configure(options) {",
+    "  io.print(options.foo)",
+    "  with options {",
+    "    io.print(@name)",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: shapeUri, languageId: "little", version: 1, text: shapeSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === shapeUri, "shape diagnostics");
+
+  send({ jsonrpc: "2.0", id: 31, method: "textDocument/hover", params: { textDocument: { uri: shapeUri }, position: { line: 7, character: 20 } } });
+  const shapeField = await waitFor((message) => message.id === 31, "shape field hover");
+  assert.match(shapeField.result.contents.value, /field foo: bool/);
+  assert.match(shapeField.result.contents.value, /should we enable foo/);
+
+  send({ jsonrpc: "2.0", id: 32, method: "textDocument/hover", params: { textDocument: { uri: shapeUri }, position: { line: 9, character: 15 } } });
+  const shapeReceiver = await waitFor((message) => message.id === 32, "shape receiver hover");
+  assert.match(shapeReceiver.result.contents.value, /field name: string/);
+
+  send({ jsonrpc: "2.0", id: 33, method: "textDocument/hover", params: { textDocument: { uri: shapeUri }, position: { line: 6, character: 14 } } });
+  const shapeParam = await waitFor((message) => message.id === 33, "shape param hover");
+  assert.match(shapeParam.result.contents.value, /param options: Options/);
+
+  send({ jsonrpc: "2.0", id: 34, method: "shutdown" });
+  const shutdown = await waitFor((message) => message.id === 34, "shutdown");
   assert.equal(shutdown.result, null);
 
   send({ jsonrpc: "2.0", method: "exit" });

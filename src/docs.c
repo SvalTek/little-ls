@@ -64,6 +64,25 @@ static char* rest_text(const char* cursor, const char* end)
 	return trim_copy(cursor, (size_t)(end - cursor));
 }
 
+/* Like next_word, but records the word's span in the source. */
+static char* next_word_at(const char** cursor, const char* end, const char* source, lt_Span* span)
+{
+	const char* position = *cursor;
+	while (position < end && is_space(*position)) position++;
+
+	const char* start = position;
+	while (position < end && !is_space(*position)) position++;
+	*cursor = position;
+
+	if (span)
+	{
+		span->start = (uint32_t)(start - source);
+		span->end = (uint32_t)(position - source);
+	}
+	if (position == start) return 0;
+	return duplicate(start, (size_t)(position - start));
+}
+
 /* `[value]`, with spaces allowed inside the brackets. */
 static char* bracket_value(const char** cursor, const char* end)
 {
@@ -121,6 +140,20 @@ static void push_tag(ltls_Doc* doc, const char* text, size_t length)
 	doc->tags[doc->tag_count++] = copy;
 }
 
+static void push_field(ltls_Doc* doc, ltls_DocField field)
+{
+	ltls_DocField* items = realloc(doc->fields, sizeof(ltls_DocField) * (doc->field_count + 1));
+	if (!items)
+	{
+		free(field.type);
+		free(field.name);
+		free(field.description);
+		return;
+	}
+	doc->fields = items;
+	doc->fields[doc->field_count++] = field;
+}
+
 static void append_description(ltls_Doc* doc, const char* text, size_t length)
 {
 	size_t used = doc->description ? strlen(doc->description) : 0;
@@ -133,7 +166,8 @@ static void append_description(ltls_Doc* doc, const char* text, size_t length)
 	doc->description[used + length] = 0;
 }
 
-static void parse_annotation(ltls_Doc* doc, const char* text, size_t length)
+static void parse_annotation(ltls_Doc* doc, const char* text, size_t length, const char* source,
+                             uint16_t line, uint32_t line_start)
 {
 	const char* end = text + length;
 	const char* tag_start = text + 1;
@@ -176,7 +210,112 @@ static void parse_annotation(ltls_Doc* doc, const char* text, size_t length)
 		return;
 	}
 
+	if (tag_length == 5 && memcmp(tag_start, "class", 5) == 0)
+	{
+		const char* cursor = tag_end;
+		lt_Span name_span = { 0, 0 };
+		char* name = next_word_at(&cursor, end, source, &name_span);
+		if (!name)
+		{
+			push_tag(doc, text, length);
+			return;
+		}
+
+		char* base = 0;
+		const char* position = cursor;
+		while (position < end && is_space(*position)) position++;
+		if (position < end && *position == ':')
+		{
+			cursor = position + 1;
+			base = next_word(&cursor, end);
+		}
+
+		doc->class_name = name;
+		doc->class_base = base;
+		doc->class_span = name_span;
+		doc->class_line = line;
+		doc->class_col = (uint16_t)(name_span.start - line_start);
+		return;
+	}
+
+	if (tag_length == 5 && memcmp(tag_start, "field", 5) == 0)
+	{
+		const char* cursor = tag_end;
+		char* type = next_word(&cursor, end);
+		lt_Span name_span = { 0, 0 };
+		char* name = next_word_at(&cursor, end, source, &name_span);
+
+		if (!type || !name)
+		{
+			free(type);
+			free(name);
+			push_tag(doc, text, length);
+			return;
+		}
+
+		ltls_DocField field;
+		field.type = type;
+		field.name = name;
+		field.description = rest_text(cursor, end);
+		field.name_span = name_span;
+		field.line = line;
+		field.col = (uint16_t)(name_span.start - line_start);
+		push_field(doc, field);
+		return;
+	}
+
 	push_tag(doc, text, length);
+}
+
+static uint32_t block_start(const lt_Tokenizer* tokens, uint32_t last)
+{
+	const char* source = tokens->source;
+	uint32_t first = last;
+
+	while (first > 0)
+	{
+		lt_Comment* previous = BUFFER_AT(lt_Comment, tokens->comment_buffer, first - 1);
+		lt_Comment* current = BUFFER_AT(lt_Comment, tokens->comment_buffer, first);
+		if (previous->line + 1 != current->line) break;
+		if (!is_doc_comment(source, previous)) break;
+		if (!is_standalone(source, previous->span.start)) break;
+		first--;
+	}
+
+	return first;
+}
+
+static uint8_t build_block(const lt_Tokenizer* tokens, uint32_t first, uint32_t last, ltls_Doc* doc)
+{
+	const char* source = tokens->source;
+
+	lt_Comment* start_comment = BUFFER_AT(lt_Comment, tokens->comment_buffer, first);
+	lt_Comment* end_comment = BUFFER_AT(lt_Comment, tokens->comment_buffer, last);
+	doc->span.start = start_comment->span.start;
+	doc->span.end = end_comment->span.end;
+
+	for (uint32_t i = first; i <= last; i++)
+	{
+		lt_Comment* comment = BUFFER_AT(lt_Comment, tokens->comment_buffer, i);
+		const char* text = source + comment->span.start + 2;
+		size_t length = (size_t)(comment->span.end - comment->span.start - 2);
+
+		if (length && is_space(*text)) { text++; length--; }
+		while (length && (is_space(text[length - 1]) || text[length - 1] == '\r')) length--;
+
+		uint32_t line_start = comment->span.start - comment->col;
+
+		if (length && text[0] == '@') parse_annotation(doc, text, length, source, comment->line, line_start);
+		else
+		{
+			const char* description = text;
+			size_t description_length = length;
+			while (description_length && is_space(*description)) { description++; description_length--; }
+			append_description(doc, description, description_length);
+		}
+	}
+
+	return 1;
 }
 
 uint8_t ltls_doc_for_line(const lt_Tokenizer* tokens, uint32_t line, ltls_Doc* doc)
@@ -198,42 +337,35 @@ uint8_t ltls_doc_for_line(const lt_Tokenizer* tokens, uint32_t line, ltls_Doc* d
 	}
 	if (last == (uint32_t)-1) return 0;
 
-	uint32_t first = last;
-	while (first > 0)
+	return build_block(tokens, block_start(tokens, last), last, doc);
+}
+
+uint8_t ltls_doc_block(const lt_Tokenizer* tokens, uint32_t comment_index, ltls_Doc* doc)
+{
+	memset(doc, 0, sizeof(ltls_Doc));
+
+	const char* source = tokens->source;
+	uint32_t count = tokens->comment_buffer.length;
+	if (!source || count == 0 || comment_index >= count) return 0;
+
+	lt_Comment* comment = BUFFER_AT(lt_Comment, tokens->comment_buffer, comment_index);
+	if (!is_doc_comment(source, comment)) return 0;
+	if (!is_standalone(source, comment->span.start)) return 0;
+
+	uint32_t first = block_start(tokens, comment_index);
+	uint32_t last = comment_index;
+
+	while (last + 1 < count)
 	{
-		lt_Comment* previous = BUFFER_AT(lt_Comment, tokens->comment_buffer, first - 1);
-		lt_Comment* current = BUFFER_AT(lt_Comment, tokens->comment_buffer, first);
-		if (previous->line + 1 != current->line) break;
-		if (!is_doc_comment(source, previous)) break;
-		if (!is_standalone(source, previous->span.start)) break;
-		first--;
+		lt_Comment* next = BUFFER_AT(lt_Comment, tokens->comment_buffer, last + 1);
+		lt_Comment* current = BUFFER_AT(lt_Comment, tokens->comment_buffer, last);
+		if (next->line != current->line + 1) break;
+		if (!is_doc_comment(source, next)) break;
+		if (!is_standalone(source, next->span.start)) break;
+		last++;
 	}
 
-	lt_Comment* start_comment = BUFFER_AT(lt_Comment, tokens->comment_buffer, first);
-	lt_Comment* end_comment = BUFFER_AT(lt_Comment, tokens->comment_buffer, last);
-	doc->span.start = start_comment->span.start;
-	doc->span.end = end_comment->span.end;
-
-	for (uint32_t i = first; i <= last; i++)
-	{
-		lt_Comment* comment = BUFFER_AT(lt_Comment, tokens->comment_buffer, i);
-		const char* text = source + comment->span.start + 2;
-		size_t length = (size_t)(comment->span.end - comment->span.start - 2);
-
-		if (length && is_space(*text)) { text++; length--; }
-		while (length && (is_space(text[length - 1]) || text[length - 1] == '\r')) length--;
-
-		if (length && text[0] == '@') parse_annotation(doc, text, length);
-		else
-		{
-			const char* description = text;
-			size_t description_length = length;
-			while (description_length && is_space(*description)) { description++; description_length--; }
-			append_description(doc, description, description_length);
-		}
-	}
-
-	return 1;
+	return build_block(tokens, first, last, doc);
 }
 
 void ltls_doc_free(ltls_Doc* doc)
@@ -254,6 +386,15 @@ void ltls_doc_free(ltls_Doc* doc)
 		free(doc->returns[i].description);
 	}
 	free(doc->returns);
+	for (uint32_t i = 0; i < doc->field_count; i++)
+	{
+		free(doc->fields[i].type);
+		free(doc->fields[i].name);
+		free(doc->fields[i].description);
+	}
+	free(doc->fields);
+	free(doc->class_name);
+	free(doc->class_base);
 	for (uint32_t i = 0; i < doc->tag_count; i++) free(doc->tags[i]);
 	free(doc->tags);
 	memset(doc, 0, sizeof(ltls_Doc));

@@ -1,4 +1,5 @@
 #include "index.h"
+#include "docs.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,12 +8,18 @@
 #define AT(type, buffer, index) \
 	((type*)((char*)(buffer).data + (buffer).element_size * (index)))
 
-static const char* token_text(const ltls_Index* index, const lt_Token* token)
+const char* ltls_index_token_text(const ltls_Index* index, const lt_Token* token)
 {
 	if (!token) return 0;
+
+	for (uint32_t i = 0; i < index->token_text_count; i++)
+		if (index->token_texts[i].token == token) return index->token_texts[i].text;
+
 	if (token->idx >= index->tokens->identifier_buffer.length) return 0;
 	return AT(lt_Identifier, index->tokens->identifier_buffer, token->idx)->name;
 }
+
+#define token_text ltls_index_token_text
 
 static uint8_t is_synthetic(const lt_Token* token)
 {
@@ -47,6 +54,8 @@ static void add_declaration(ltls_Index* index, lt_Token* name, lt_Span span, lt_
 	declaration.node = node;
 	declaration.member = member;
 	declaration.types = 0;
+	declaration.annotation = 0;
+	declaration.detail = 0;
 	declaration.kind = kind;
 	declaration.is_global = is_global;
 	push_declaration(index, declaration);
@@ -117,6 +126,7 @@ static lt_Token* member_token(lt_AstNode* idx)
 }
 
 static const ltls_Declaration* resolve_member(const ltls_Index* index, lt_AstNode* class_node, lt_Token* token);
+static uint8_t declaration_name_equals(const ltls_Index* index, const ltls_Declaration* declaration, const lt_Token* token);
 
 /* `this.name = ...` (including `@name` constructor parameters) creates a field
    even when the class body does not declare it. */
@@ -317,11 +327,135 @@ static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_A
 	}
 }
 
+static char* copy_text(const char* text)
+{
+	if (!text) return 0;
+	size_t length = strlen(text);
+	char* copy = malloc(length + 1);
+	if (copy) memcpy(copy, text, length + 1);
+	return copy;
+}
+
+static lt_Token* synthetic_token(ltls_Index* index, lt_Span span, uint16_t line, uint16_t col, const char* text)
+{
+	lt_Token* token = calloc(1, sizeof(lt_Token));
+	if (!token) return 0;
+
+	token->type = LT_TOKEN_IDENTIFIER;
+	token->line = line;
+	token->col = col;
+	token->span = span;
+	token->flags = LT_TOKEN_SYNTHETIC;
+
+	lt_Token** tokens = realloc(index->token_allocations, sizeof(lt_Token*) * (index->token_allocation_count + 1));
+	if (!tokens)
+	{
+		free(token);
+		return 0;
+	}
+	index->token_allocations = tokens;
+	index->token_allocations[index->token_allocation_count++] = token;
+
+	char* copy = copy_text(text);
+	ltls_TokenText* texts = realloc(index->token_texts, sizeof(ltls_TokenText) * (index->token_text_count + 1));
+	if (!texts || !copy)
+	{
+		free(copy);
+		free(texts);
+		return token;
+	}
+	index->token_texts = texts;
+	index->token_texts[index->token_text_count].token = token;
+	index->token_texts[index->token_text_count].text = copy;
+	index->token_text_count++;
+	return token;
+}
+
+static lt_AstNode* synthetic_class(ltls_Index* index)
+{
+	lt_AstNode* node = calloc(1, sizeof(lt_AstNode));
+	if (!node) return 0;
+	node->type = LT_AST_NODE_CLASS;
+
+	lt_AstNode** nodes = realloc(index->node_allocations, sizeof(lt_AstNode*) * (index->node_allocation_count + 1));
+	if (!nodes)
+	{
+		free(node);
+		return 0;
+	}
+	index->node_allocations = nodes;
+	index->node_allocations[index->node_allocation_count++] = node;
+	return node;
+}
+
+/* `@class Name [: Base]` with `@field type name` members becomes a real class
+   node and field declarations, so the existing member lookup handles it. */
+static void build_doc_shapes(ltls_Index* index)
+{
+	const char* source = index->source;
+	uint32_t count = index->tokens->comment_buffer.length;
+	uint32_t skip_until_line = 0;
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		lt_Comment* comment = AT(lt_Comment, index->tokens->comment_buffer, i);
+		if (comment->line <= skip_until_line) continue;
+		if (!source) continue;
+
+		ltls_Doc doc;
+		if (!ltls_doc_block(index->tokens, i, &doc)) continue;
+
+		uint32_t last_line = comment->line;
+		for (uint32_t j = i; j < count; j++)
+		{
+			lt_Comment* candidate = AT(lt_Comment, index->tokens->comment_buffer, j);
+			if (candidate->span.start >= doc.span.end) break;
+			last_line = candidate->line;
+		}
+		skip_until_line = last_line;
+
+		if (!doc.class_name)
+		{
+			ltls_doc_free(&doc);
+			continue;
+		}
+
+		lt_Token* name = synthetic_token(index, doc.class_span, doc.class_line, doc.class_col, doc.class_name);
+		lt_AstNode* klass = synthetic_class(index);
+		if (name && klass)
+		{
+			klass->class_decl.identifier = name;
+			klass->span = doc.class_span;
+
+			if (doc.class_base)
+				klass->class_decl.superclass = synthetic_token(index, doc.class_span, doc.class_line, doc.class_col, doc.class_base);
+
+			add_declaration(index, name, doc.class_span, 0, klass, 0, LTLS_DECL_CLASS, 0);
+
+			for (uint32_t f = 0; f < doc.field_count; f++)
+			{
+				ltls_DocField* field = &doc.fields[f];
+				lt_Token* field_token = synthetic_token(index, field->name_span, field->line, field->col, field->name);
+				if (!field_token) continue;
+
+				add_declaration(index, field_token, field->name_span, 0, klass, 0, LTLS_DECL_FIELD, 0);
+				ltls_Declaration* declaration = &index->declarations[index->declaration_count - 1];
+				declaration->annotation = copy_text(field->type);
+				if (field->description && field->description[0]) declaration->detail = copy_text(field->description);
+			}
+		}
+
+		ltls_doc_free(&doc);
+	}
+}
+
 void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis)
 {
 	memset(index, 0, sizeof(ltls_Index));
 	index->tokens = &analysis->tokens;
 	index->source = analysis->source;
+
+	build_doc_shapes(index);
 
 	if (!analysis->parser.root) return;
 	lt_AstNode* root = analysis->parser.root;
@@ -333,6 +467,19 @@ void ltls_index_free(ltls_Index* index)
 {
 	for (uint32_t i = 0; i < index->allocation_count; i++) free(index->allocations[i]);
 	free(index->allocations);
+
+	for (uint32_t i = 0; i < index->declaration_count; i++)
+	{
+		free(index->declarations[i].annotation);
+		free(index->declarations[i].detail);
+	}
+	for (uint32_t i = 0; i < index->token_text_count; i++) free(index->token_texts[i].text);
+	free(index->token_texts);
+	for (uint32_t i = 0; i < index->token_allocation_count; i++) free(index->token_allocations[i]);
+	free(index->token_allocations);
+	for (uint32_t i = 0; i < index->node_allocation_count; i++) free(index->node_allocations[i]);
+	free(index->node_allocations);
+
 	free(index->node_types);
 	free(index->function_returns);
 	free(index->declarations);
@@ -536,7 +683,7 @@ static const ltls_Declaration* resolve_member(const ltls_Index* index, lt_AstNod
 			const ltls_Declaration* declaration = &index->declarations[i];
 			if (declaration->node != class_node) continue;
 			if (declaration->kind < LTLS_DECL_FIELD || declaration->kind > LTLS_DECL_PROPERTY) continue;
-			if (declaration->name->idx == token->idx) return declaration;
+			if (declaration_name_equals(index, declaration, token)) return declaration;
 		}
 
 		class_node = superclass_node(index, class_node);
@@ -552,13 +699,20 @@ const ltls_Declaration* ltls_index_lookup(const ltls_Index* index, lt_Scope* sco
 	return resolve_global(index, token);
 }
 
+static uint8_t declaration_name_equals(const ltls_Index* index, const ltls_Declaration* declaration, const lt_Token* token)
+{
+	const char* left = token_text(index, declaration->name);
+	const char* right = token_text(index, token);
+	return left && right && strcmp(left, right) == 0;
+}
+
 static const ltls_Declaration* resolve_table_field(const ltls_Index* index, lt_AstNode* table, lt_Token* token)
 {
 	for (uint32_t i = 0; i < index->declaration_count; i++)
 	{
 		const ltls_Declaration* declaration = &index->declarations[i];
-		if (declaration->kind == LTLS_DECL_FIELD && declaration->node == table && declaration->name->idx == token->idx)
-			return declaration;
+		if (declaration->kind != LTLS_DECL_FIELD || declaration->node != table) continue;
+		if (declaration_name_equals(index, declaration, token)) return declaration;
 	}
 	return 0;
 }
