@@ -32,6 +32,13 @@ surprising. It is not a bug list; most of these are bounded choices.
   generic receivers, and calls through dynamic receivers are unchecked.
 - Annotated declarations are authoritative: mismatched assignments warn and
   do not widen the hover type.
+- Structural matching applies only to object/table shapes: virtual `@class`
+  types and anonymous `{ ... }` shapes against tables or instances. Real
+  classes remain nominal, and function types compare by identity.
+- Missing expected fields fail, extra fields are accepted, and matching stops
+  at a fixed depth. Anonymous-shape diagnostics render both sides as
+  `table`, so the message does not name the offending field.
+- `table`, `array` and `fn` annotations are wildcards for their kind.
 - Dynamic member dispatch is unresolved: `obj:method()` or `obj.method` where
   `obj`'s type is unknown yields unknown, and completion offers nothing.
 - A union receiver resolves member access to the first alternative that has

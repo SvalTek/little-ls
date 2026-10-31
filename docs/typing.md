@@ -204,8 +204,17 @@ Rules:
 
 - A warning is emitted only when both sides are fully known. Unknown values,
   dynamic tables and unbound type variables never warn.
-- Every alternative of the assigned type must be present in the expected
-  type; `number | string` does not satisfy `number`.
+- Exact alternatives win first. If none match, structural acceptance applies:
+  - a virtual `@class` shape accepts a table literal or instance whose fields
+    satisfy it (extra fields allowed, missing or mismatched fields warn);
+  - an anonymous `{ ... }` shape works the same way;
+  - `table`, `array` and `fn` are wildcards for any value of that kind;
+  - real classes stay nominal: a plain table does not satisfy `Point`.
+- Arrays compare element types when both are known.
+- Structural matching is depth-limited; deeply nested shapes fall back to
+  "compatible".
+- Every alternative of the assigned type must be accepted; `number | string`
+  does not satisfy `number`.
 - An explicit annotation is authoritative: assignments are checked against it
   and do not widen the hover type.
 - Warnings carry severity `Warning` (2) and the range of the offending

@@ -1226,6 +1226,67 @@ async function main() {
     "clean diagnostics"
   );
   assert.equal(cleanDiagnostics.params.diagnostics.length, 0);
+  const structShapeUri = "file:///test/diagnostics-shape.little";
+  const structShapeText = [
+    ";; @class Opts",
+    ";; @field string baseUrl",
+    ";; @field number port",
+    ";;",
+    ";; @param Opts opts",
+    "fn use(opts) {}",
+    "use({ baseUrl: \"localhost\" port: 1 })",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: structShapeUri, languageId: "little", version: 1, text: structShapeText } }
+  });
+  const structShapeDiagnostics = await waitFor(
+    (message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === structShapeUri,
+    "shape diagnostics"
+  );
+  assert.equal(structShapeDiagnostics.params.diagnostics.length, 0);
+
+  const structBadUri = "file:///test/diagnostics-shape-bad.little";
+  const structBadText = ";; @param { port: number } c\nfn take(c) {}\ntake({ port: \"x\" })\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: structBadUri, languageId: "little", version: 1, text: structBadText } }
+  });
+  const structBadDiagnostics = await waitFor(
+    (message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === structBadUri,
+    "bad shape diagnostics"
+  );
+  assert.equal(structBadDiagnostics.params.diagnostics.length, 1);
+
+  const wildcardUri = "file:///test/diagnostics-wildcards.little";
+  const wildcardText = ";; @param table t\nfn take(t) {}\ntake({ a: 1 })\n;; @param array a\nfn arr(a) {}\narr([1, 2])\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: wildcardUri, languageId: "little", version: 1, text: wildcardText } }
+  });
+  const wildcardDiagnostics = await waitFor(
+    (message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === wildcardUri,
+    "wildcard diagnostics"
+  );
+  assert.equal(wildcardDiagnostics.params.diagnostics.length, 0);
+
+  const realClassUri = "file:///test/diagnostics-real-class.little";
+  const realClassText = "class Point {\n  x\n}\n;; @param Point p\nfn take(p) {}\ntake({ x: 1 })\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: realClassUri, languageId: "little", version: 1, text: realClassText } }
+  });
+  const realClassDiagnostics = await waitFor(
+    (message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === realClassUri,
+    "real class diagnostics"
+  );
+  assert.equal(realClassDiagnostics.params.diagnostics.length, 1);
+
 
   send({ jsonrpc: "2.0", id: 69, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 14 } } });
   const tableThisTarget = await waitFor((message) => message.id === 69, "table this target hover");

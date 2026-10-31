@@ -13,6 +13,10 @@ cleared when the document closes.
 - Type warnings cover call arguments, annotated return values and writes to
   annotated members. They are emitted only when both expected and assigned
   types are fully known; unknown or dynamic values never warn.
+- Compatibility prefers exact matches, then accepts comparable table/object
+  shapes: virtual `@class` types and anonymous `{ ... }` shapes accept tables
+  or instances with matching fields. `table`, `array` and `fn` are wildcards;
+  real classes stay nominal.
 - Severity is warning for type mismatches and error for syntax errors.
 - Unresolved names and unused values never produce diagnostics.
 - The parser recovers per statement, so a broken statement usually produces

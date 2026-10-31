@@ -319,29 +319,149 @@ static lt_Token* member_token(lt_AstNode* idx)
 	return 0;
 }
 
-static uint8_t type_includes(ltls_Index* index, ltls_TypeSet expected, ltls_TypeSet value)
+static uint8_t types_compatible(ltls_Index* index, ltls_TypeSet expected, ltls_TypeSet value, uint8_t depth);
+
+/* A class materialized from `@class` (synthetic name, no real declaration in
+   source) describes an object shape rather than a nominal runtime class. */
+static uint8_t class_is_virtual(ltls_Index* index, lt_AstNode* class_node)
 {
+	(void)index;
+	if (!class_node || class_node->type != LT_AST_NODE_CLASS) return 0;
+	lt_Token* name = class_node->class_decl.identifier;
+	if (!name) return 1;
+	return (name->flags & LT_TOKEN_SYNTHETIC) != 0;
+}
+
+static const ltls_Declaration* owner_member(ltls_Index* index, lt_AstNode* owner, const char* name)
+{
+	for (uint32_t i = 0; i < index->declaration_count; i++)
+	{
+		const ltls_Declaration* declaration = &index->declarations[i];
+		if (declaration->node != owner) continue;
+		if (declaration->kind < LTLS_DECL_FIELD || declaration->kind > LTLS_DECL_PROPERTY) continue;
+
+		const char* candidate = token_text(index, declaration->name);
+		if (candidate && strcmp(candidate, name) == 0) return declaration;
+	}
+	return 0;
+}
+
+/* Every field described by the expected shape must exist on the actual table
+   or instance with a compatible type. Extra fields are allowed. */
+static uint8_t structural_match(ltls_Index* index, lt_AstNode* expected, lt_AstNode* actual, uint8_t depth)
+{
+	if (depth > 4 || !expected || !actual) return 1;
+
+	const ltls_Declaration* members[256];
+	uint32_t count = expected->type == LT_AST_NODE_CLASS
+		? ltls_index_members(index, expected, members, 256)
+		: ltls_index_table_members(index, expected, members, 256);
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const ltls_Declaration* member = members[i];
+		const char* name = token_text(index, member->name);
+		if (!name) continue;
+
+		const ltls_Declaration* actual_member = owner_member(index, actual, name);
+		if (!actual_member) return 0;
+		if (member->types && actual_member->types &&
+		    !types_compatible(index, member->types, actual_member->types, depth + 1)) return 0;
+	}
+	return 1;
+}
+
+static uint8_t type_accepts(ltls_Index* index, ltls_TypeSet expected, ltls_TypeSet value, uint8_t depth)
+{
+	if (expected->kind == LTLS_TYPE_PARAM) return 1;
+
+	if (expected->kind != value->kind)
+	{
+		if (expected->kind == LTLS_TYPE_TABLE)
+		{
+			if (!expected->node) return value->kind == LTLS_TYPE_TABLE || value->kind == LTLS_TYPE_INSTANCE;
+			if (value->kind == LTLS_TYPE_TABLE || value->kind == LTLS_TYPE_INSTANCE)
+				return structural_match(index, expected->node, value->node, depth + 1);
+			return 0;
+		}
+
+		if (expected->kind == LTLS_TYPE_INSTANCE && expected->node &&
+		    class_is_virtual(index, expected->node) &&
+		    (value->kind == LTLS_TYPE_TABLE || value->kind == LTLS_TYPE_INSTANCE))
+			return structural_match(index, expected->node, value->node, depth + 1);
+
+		return 0;
+	}
+
+	switch (expected->kind)
+	{
+	case LTLS_TYPE_TABLE:
+		if (!expected->node) return 1;
+		if (value->node == expected->node) return 1;
+		if (expected->node->type == LT_AST_NODE_TABLE && value->node)
+			return structural_match(index, expected->node, value->node, depth + 1);
+		return 0;
+
+	case LTLS_TYPE_ARRAY:
+		if (!expected->node) return 1;
+		if (value->node == expected->node) return 1;
+		return types_compatible(index,
+			ltls_index_array_element(index, expected->node),
+			ltls_index_array_element(index, value->node), depth + 1);
+
+	case LTLS_TYPE_FUNCTION:
+		return !expected->node || value->node == expected->node;
+
+	case LTLS_TYPE_INSTANCE:
+		if (!expected->node) return 1;
+		if (value->node == expected->node) return 1;
+		if (class_is_virtual(index, expected->node))
+			return structural_match(index, expected->node, value->node, depth + 1);
+		return 0;
+
+	case LTLS_TYPE_PARAM:
+		return 1;
+
+	default:
+		return value->node == expected->node;
+	}
+}
+
+/* Exact matching first; then wildcard/structural acceptance. */
+static uint8_t types_compatible(ltls_Index* index, ltls_TypeSet expected, ltls_TypeSet value, uint8_t depth)
+{
+	if (!expected || !value || depth > 8) return 1;
+
 	for (ltls_TypeSet type = expected; type; type = type->next)
 		if (type->kind == LTLS_TYPE_PARAM) return 1;
 
-	for (ltls_TypeSet type = value; type; type = type->next)
+	for (ltls_TypeSet actual = value; actual; actual = actual->next)
 	{
-		if (type->kind == LTLS_TYPE_PARAM) return 1;
+		if (actual->kind == LTLS_TYPE_PARAM) return 1;
 
-		uint8_t found = 0;
+		uint8_t accepted = 0;
 		for (ltls_TypeSet candidate = expected; candidate; candidate = candidate->next)
 		{
-			if (candidate->kind != type->kind) continue;
-			if (candidate->kind == LTLS_TYPE_PARAM)
+			if (candidate->kind != actual->kind) continue;
+			if (candidate->kind == LTLS_TYPE_PARAM || candidate->node == actual->node)
 			{
-				if (candidate->name && type->name && strcmp(candidate->name, type->name) == 0) { found = 1; break; }
-				continue;
+				accepted = 1;
+				break;
 			}
-			if (candidate->node == type->node) { found = 1; break; }
 		}
-		if (!found) return 0;
+
+		if (!accepted)
+			for (ltls_TypeSet candidate = expected; candidate; candidate = candidate->next)
+				if (type_accepts(index, candidate, actual, depth)) { accepted = 1; break; }
+
+		if (!accepted) return 0;
 	}
 	return 1;
+}
+
+static uint8_t type_includes(ltls_Index* index, ltls_TypeSet expected, ltls_TypeSet value)
+{
+	return types_compatible(index, expected, value, 0);
 }
 
 static void report_mismatch(ltls_Context* context, lt_Span span, ltls_TypeSet expected,
