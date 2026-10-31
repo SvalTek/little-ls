@@ -187,6 +187,34 @@ Generic types render as `Box<number>` in hover and variable signatures.
 Specializations are identified by the class and its argument types; the same
 class with different arguments yields distinct types.
 
+## Type diagnostics
+
+Annotated types are enforced as **warnings**, never errors, and the runtime
+still accepts everything. Diagnostic checks run in a separate verification
+pass after inference settles.
+
+Checked:
+
+- call arguments against annotated parameters, including constructors;
+- `@return` against the returned expression;
+- writes to annotated fields/members, including generic substitution
+  (`Box<number>.value` expects `number`).
+
+Rules:
+
+- A warning is emitted only when both sides are fully known. Unknown values,
+  dynamic tables and unbound type variables never warn.
+- Every alternative of the assigned type must be present in the expected
+  type; `number | string` does not satisfy `number`.
+- An explicit annotation is authoritative: assignments are checked against it
+  and do not widen the hover type.
+- Warnings carry severity `Warning` (2) and the range of the offending
+  argument/expression.
+
+Not checked yet: assignments to unannotated locals/parameters, method
+arguments on instantiated generic receivers, and calls through dynamic
+receivers.
+
 ## Standard library
 
 Standard symbols are generated from `[LittleBinding]` comments in the `little`

@@ -1181,6 +1181,52 @@ async function main() {
   assert.match((await pairHover(131, 13, 4)).result.contents.value, /var ps: string/);
   assert.match((await pairHover(132, 16, 6)).result.contents.value, /var n: (number \| null|null \| number)/);
 
+  const diagUri = "file:///test/diagnostics.little";
+  const diagText = [
+    ";; @param string t test",
+    "fn foo(t) { return t }",
+    "foo(1)",
+    "",
+    ";; @return string",
+    "fn bar() { return 1 }",
+    "",
+    ";; @class Config",
+    ";; @field number port",
+    "class Config {",
+    "}",
+    "var c = Config()",
+    "c.port = \"x\"",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: diagUri, languageId: "little", version: 1, text: diagText } }
+  });
+  const typeDiagnostics = await waitFor(
+    (message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === diagUri,
+    "type diagnostics"
+  );
+  const messages = typeDiagnostics.params.diagnostics.map((diagnostic) => diagnostic.message);
+  assert.equal(messages.length, 3);
+  assert.ok(messages.some((message) => /argument 1 of foo: expected string, got number/.test(message)));
+  assert.ok(messages.some((message) => /return value: expected string, got number/.test(message)));
+  assert.ok(messages.some((message) => /assignment to port: expected number, got string/.test(message)));
+  assert.ok(typeDiagnostics.params.diagnostics.every((diagnostic) => diagnostic.severity === 2));
+
+  const cleanUri = "file:///test/diagnostics-clean.little";
+  const cleanText = ";; @param number n\nfn ok(n) { return n }\nok(1)\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: cleanUri, languageId: "little", version: 1, text: cleanText } }
+  });
+  const cleanDiagnostics = await waitFor(
+    (message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === cleanUri,
+    "clean diagnostics"
+  );
+  assert.equal(cleanDiagnostics.params.diagnostics.length, 0);
+
   send({ jsonrpc: "2.0", id: 69, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 14 } } });
   const tableThisTarget = await waitFor((message) => message.id === 69, "table this target hover");
   assert.match(tableThisTarget.result.contents.value, /this: table/);

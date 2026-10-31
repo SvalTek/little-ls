@@ -292,6 +292,32 @@ static uint32_t position_to_offset(const ltls_LineIndex* index, const char* text
    Diagnostics
    ------------------------------------------------------------------------- */
 
+static void add_published_diagnostic(yyjson_mut_doc* document, yyjson_mut_val* list,
+                                   const ltls_LineIndex* index, const char* text, uint32_t text_length,
+                                   lt_Span span, uint8_t severity, const char* message)
+{
+	uint32_t start = span.start;
+	uint32_t end = span.end;
+	if (start > text_length) start = text_length;
+	if (end > text_length) end = text_length;
+	if (end <= start)
+	{
+		if (start == text_length && start > 0) start--;
+		end = start < text_length ? start + 1 : text_length;
+	}
+
+	yyjson_mut_val* range = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_val(document, range, "start", position_object(document, index, text, start));
+	yyjson_mut_obj_add_val(document, range, "end", position_object(document, index, text, end));
+
+	yyjson_mut_val* entry = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_val(document, entry, "range", range);
+	yyjson_mut_obj_add_int(document, entry, "severity", severity);
+	yyjson_mut_obj_add_strcpy(document, entry, "source", "little");
+	yyjson_mut_obj_add_strcpy(document, entry, "message", message);
+	yyjson_mut_arr_add_val(list, entry);
+}
+
 static void publish_diagnostics(const char* uri, int64_t version, const char* text)
 {
 	/* A fresh VM per analysis bounds the memory left behind by the parser's
@@ -306,8 +332,17 @@ static void publish_diagnostics(const char* uri, int64_t version, const char* te
 	line_index_build(&index, text);
 	uint32_t text_length = (uint32_t)strlen(text);
 
+	ltls_Index semantic;
+	ltls_index_build_verifying(&semantic, &analysis);
+
 	yyjson_mut_doc* document = yyjson_mut_doc_new(0);
-	if (!document) { line_index_free(&index); lt_analysis_free(vm, &analysis); return; }
+	if (!document)
+	{
+		ltls_index_free(&semantic);
+		line_index_free(&index);
+		lt_analysis_free(vm, &analysis);
+		return;
+	}
 
 	yyjson_mut_val* root = yyjson_mut_obj(document);
 	yyjson_mut_obj_add_str(document, root, "jsonrpc", "2.0");
@@ -321,27 +356,15 @@ static void publish_diagnostics(const char* uri, int64_t version, const char* te
 	for (uint32_t i = 0; i < lt_diagnostic_count(vm); i++)
 	{
 		const lt_Diagnostic* diagnostic = lt_diagnostic_get(vm, i);
+		add_published_diagnostic(document, list, &index, text, text_length,
+			diagnostic->span, diagnostic->severity, diagnostic->message);
+	}
 
-		uint32_t start = diagnostic->span.start;
-		uint32_t end = diagnostic->span.end;
-		if (start > text_length) start = text_length;
-		if (end > text_length) end = text_length;
-		if (end <= start)
-		{
-			if (start == text_length && start > 0) start--;
-			end = start < text_length ? start + 1 : text_length;
-		}
-
-		yyjson_mut_val* range = yyjson_mut_obj(document);
-		yyjson_mut_obj_add_val(document, range, "start", position_object(document, &index, text, start));
-		yyjson_mut_obj_add_val(document, range, "end", position_object(document, &index, text, end));
-
-		yyjson_mut_val* entry = yyjson_mut_obj(document);
-		yyjson_mut_obj_add_val(document, entry, "range", range);
-		yyjson_mut_obj_add_int(document, entry, "severity", diagnostic->severity);
-		yyjson_mut_obj_add_strcpy(document, entry, "source", "little");
-		yyjson_mut_obj_add_strcpy(document, entry, "message", diagnostic->message);
-		yyjson_mut_arr_add_val(list, entry);
+	for (uint32_t i = 0; i < semantic.type_diagnostic_count; i++)
+	{
+		const ltls_TypeDiagnostic* diagnostic = &semantic.type_diagnostics[i];
+		add_published_diagnostic(document, list, &index, text, text_length,
+			diagnostic->span, diagnostic->severity, diagnostic->message);
 	}
 
 	yyjson_mut_obj_add_val(document, params, "diagnostics", list);
@@ -350,6 +373,7 @@ static void publish_diagnostics(const char* uri, int64_t version, const char* te
 	write_json(document);
 	yyjson_mut_doc_free(document);
 
+	ltls_index_free(&semantic);
 	line_index_free(&index);
 	lt_analysis_free(vm, &analysis);
 	lt_destroy(vm);

@@ -27,6 +27,11 @@ surprising. It is not a bug list; most of these are bounded choices.
 ## Types
 
 - Unknown is silent and normal. There is no "any" and no error for it.
+- Type diagnostics are warnings only, and only for fully known types.
+  Assignments to unannotated locals/params, method arguments on instantiated
+  generic receivers, and calls through dynamic receivers are unchecked.
+- Annotated declarations are authoritative: mismatched assignments warn and
+  do not widen the hover type.
 - Dynamic member dispatch is unresolved: `obj:method()` or `obj.method` where
   `obj`'s type is unknown yields unknown, and completion offers nothing.
 - A union receiver resolves member access to the first alternative that has

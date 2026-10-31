@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdio.h>
 
 #define AT(type, buffer, index) \
 	((type*)((char*)(buffer).data + (buffer).element_size * (index)))
@@ -28,6 +29,7 @@ typedef struct {
 	lt_AstNode* function;
 	const char* const* generics;
 	uint32_t generic_count;
+	uint8_t verify;
 	uint8_t changed;
 } ltls_Context;
 
@@ -271,6 +273,10 @@ static uint8_t write_declaration(ltls_Context* context, ltls_Declaration* declar
 	if (declaration_is_private(declaration) && declaration_is_live(context, declaration))
 		context->env[declaration_index(context->index, declaration)] = types;
 
+	/* An explicit annotation is authoritative: assignments are checked
+	   against it instead of widening it. */
+	if (declaration->annotation) return 0;
+
 	ltls_TypeSet before = declaration->types;
 	declaration->types = ltls_type_union(context->index, declaration->types, types);
 	if (!ltls_type_equals(before, declaration->types))
@@ -311,6 +317,69 @@ static lt_Token* member_token(lt_AstNode* idx)
 	if (idx->type == LT_AST_NODE_LITERAL) return idx->literal.token;
 	if (idx->type == LT_AST_NODE_IDENTIFIER) return idx->identifier.token;
 	return 0;
+}
+
+static uint8_t type_includes(ltls_Index* index, ltls_TypeSet expected, ltls_TypeSet value)
+{
+	for (ltls_TypeSet type = expected; type; type = type->next)
+		if (type->kind == LTLS_TYPE_PARAM) return 1;
+
+	for (ltls_TypeSet type = value; type; type = type->next)
+	{
+		if (type->kind == LTLS_TYPE_PARAM) return 1;
+
+		uint8_t found = 0;
+		for (ltls_TypeSet candidate = expected; candidate; candidate = candidate->next)
+		{
+			if (candidate->kind != type->kind) continue;
+			if (candidate->kind == LTLS_TYPE_PARAM)
+			{
+				if (candidate->name && type->name && strcmp(candidate->name, type->name) == 0) { found = 1; break; }
+				continue;
+			}
+			if (candidate->node == type->node) { found = 1; break; }
+		}
+		if (!found) return 0;
+	}
+	return 1;
+}
+
+static void report_mismatch(ltls_Context* context, lt_Span span, ltls_TypeSet expected,
+                            ltls_TypeSet actual, const char* what)
+{
+	if (!context->verify || !expected || !actual) return;
+	if (type_includes(context->index, expected, actual)) return;
+
+	char expected_text[128], actual_text[128], message[320];
+	ltls_type_describe(context->index, expected, expected_text, sizeof(expected_text));
+	ltls_type_describe(context->index, actual, actual_text, sizeof(actual_text));
+	snprintf(message, sizeof(message), "%s: expected %s, got %s", what, expected_text, actual_text);
+	ltls_index_add_type_diagnostic(context->index, span, 2, message);
+}
+
+static void check_arguments(ltls_Context* context, lt_AstNode* fn, lt_AstNode* call, uint8_t start,
+                            uint32_t argument_count, ltls_TypeSet* argument_types,
+                            const char* const* names, ltls_TypeSet* bindings, uint32_t generic_count,
+                            const char* label)
+{
+	if (!context->verify || !fn) return;
+
+	for (uint32_t i = 0; i < argument_count; i++)
+	{
+		lt_Token* parameter = fn->fn.args[start + i];
+		if (!parameter) break;
+		ltls_Declaration* declaration = declaration_for_token(context->index, parameter);
+		if (!declaration || !declaration->types) continue;
+
+		ltls_TypeSet expected = declaration->types;
+		if (generic_count && names && bindings)
+			expected = ltls_index_substitute(context->index, expected, names, bindings, generic_count);
+
+		lt_Span span = call->call.args[i] ? call->call.args[i]->span : call->span;
+		char what[160];
+		snprintf(what, sizeof(what), "argument %u of %s", i + 1, label ? label : "function");
+		report_mismatch(context, span, expected, argument_types[i], what);
+	}
 }
 
 static ltls_TypeSet member_type(ltls_Context* context, ltls_TypeSet receiver, lt_Token* member)
@@ -495,6 +564,7 @@ static void apply_function_docs(ltls_Context* context, lt_AstNode* fn)
 		ltls_TypeSet before = ltls_index_returns(context->index, fn);
 		ltls_TypeSet after = ltls_index_add_return(context->index, fn, type);
 		if (!ltls_type_equals(before, after)) context->changed = 1;
+		ltls_index_set_declared_return(context->index, fn, type);
 	}
 
 	ltls_doc_free(&doc);
@@ -638,14 +708,14 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 
 	/* `array.slice` and `array.reverse` return a new array with the same
 	   elements; carry the source element type through. */
-	lt_Token* callee_token = 0;
+	lt_Token* callee_identifier = 0;
 	if (node->call.callee->type == LT_AST_NODE_IDENTIFIER)
-		callee_token = node->call.callee->identifier.token;
+		callee_identifier = node->call.callee->identifier.token;
 	else if (node->call.callee->type == LT_AST_NODE_INDEX)
-		callee_token = member_token(node->call.callee->index.idx);
+		callee_identifier = member_token(node->call.callee->index.idx);
 
-	const ltls_Declaration* declaration = callee_token
-		? ltls_index_resolve(context->index, callee_token->span.start, 0) : 0;
+	const ltls_Declaration* declaration = callee_identifier
+		? ltls_index_resolve(context->index, callee_identifier->span.start, 0) : 0;
 
 	if (declaration_is_unpack(declaration))
 	{
@@ -685,6 +755,9 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 		if (preserved) result = preserved;
 	}
 
+	lt_Token* named_callee = callee_token(node->call.callee);
+	const char* call_label = named_callee ? token_text(context->index, named_callee) : "function";
+
 	/* Bind generic parameters from argument types. */
 	ltls_TypeSet inferred_instances = 0;
 	for (ltls_TypeSet type = callee; type; type = type->next)
@@ -694,16 +767,16 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 			lt_AstNode* fn = type->node;
 			uint32_t generic_count = 0;
 			const char* const* names = ltls_index_generics(context->index, fn, &generic_count);
-			if (!generic_count || generic_count > 16) continue;
+			if (generic_count > 16) continue;
 
 			ltls_TypeSet bindings[16];
 			memset(bindings, 0, sizeof(bindings));
 
 			uint8_t start = 0;
-			const char* first_name = fn && fn->fn.args[0] ? token_text(context->index, fn->fn.args[0]) : 0;
+			const char* first_name = fn->fn.args[0] ? token_text(context->index, fn->fn.args[0]) : 0;
 			if (first_name && strcmp(first_name, "this") == 0) start = 1;
 
-			for (uint32_t i = 0; i < argument_count; i++)
+			for (uint32_t i = 0; i < argument_count && generic_count; i++)
 			{
 				lt_Token* parameter = fn->fn.args[start + i];
 				if (!parameter) break;
@@ -712,16 +785,22 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 				bind_parameter(context, names, generic_count, declaration->types, argument_types[i], bindings);
 			}
 
-			ltls_TypeSet substituted = ltls_index_substitute(context->index,
-				ltls_index_returns(context->index, fn), names, bindings, generic_count);
-			if (substituted) result = substituted;
+			check_arguments(context, fn, node, start, argument_count, argument_types,
+				names, bindings, generic_count, call_label);
+
+			if (generic_count)
+			{
+				ltls_TypeSet substituted = ltls_index_substitute(context->index,
+					ltls_index_returns(context->index, fn), names, bindings, generic_count);
+				if (substituted) result = substituted;
+			}
 		}
 		else if (type->kind == LTLS_TYPE_CLASS)
 		{
 			lt_AstNode* klass = type->node;
 			uint32_t generic_count = 0;
 			const char* const* names = ltls_index_generics(context->index, klass, &generic_count);
-			if (!generic_count || generic_count > 16) continue;
+			if (generic_count > 16) continue;
 
 			const ltls_Declaration* constructor = member_named(context->index, klass, "constructor");
 			lt_AstNode* fn = constructor ? ltls_index_function_node(constructor) : 0;
@@ -735,7 +814,7 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 			if (first_name && strcmp(first_name, "this") == 0) start = 1;
 
 			uint8_t bound = 0;
-			for (uint32_t i = 0; i < argument_count; i++)
+			for (uint32_t i = 0; i < argument_count && generic_count; i++)
 			{
 				lt_Token* parameter = fn->fn.args[start + i];
 				if (!parameter) break;
@@ -745,7 +824,10 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 			}
 			for (uint32_t i = 0; i < generic_count; i++) if (bindings[i]) bound = 1;
 
-			if (bound)
+			check_arguments(context, fn, node, start, argument_count, argument_types,
+				names, bindings, generic_count, call_label);
+
+			if (generic_count && bound)
 				inferred_instances = ltls_type_union(context->index, inferred_instances,
 					ltls_type_instance(context->index, klass, bindings, generic_count));
 		}
@@ -785,7 +867,7 @@ static ltls_TypeSet analyze_index(ltls_Context* context, lt_AstNode* node)
 	return element;
 }
 
-static void assign_target(ltls_Context* context, lt_AstNode* target, ltls_TypeSet types)
+static void assign_target(ltls_Context* context, lt_AstNode* target, ltls_TypeSet types, lt_Span span)
 {
 	if (target->type == LT_AST_NODE_IDENTIFIER)
 	{
@@ -812,15 +894,41 @@ static void assign_target(ltls_Context* context, lt_AstNode* target, ltls_TypeSe
 		}
 
 		ltls_TypeSet receiver = ltls_index_type_of(context->index, reference->receiver_expr);
+		const char* member_name = token_text(context->index, member);
 		for (ltls_TypeSet type = receiver; type; type = type->next)
 		{
 			ltls_Declaration* declaration = 0;
-			if (type->kind == LTLS_TYPE_INSTANCE)
-				declaration = (ltls_Declaration*)ltls_index_member(context->index, type->node, member);
-			else if (type->kind == LTLS_TYPE_TABLE)
-				declaration = (ltls_Declaration*)ltls_index_table_field(context->index, type->node, member);
+			ltls_TypeSet expected = 0;
 
-			if (declaration) write_declaration(context, declaration, types);
+			if (type->kind == LTLS_TYPE_INSTANCE)
+			{
+				lt_AstNode* base = ltls_index_class_base(context->index, type->node);
+				declaration = (ltls_Declaration*)ltls_index_member(context->index, base, member);
+				if (declaration)
+				{
+					uint32_t argument_count = 0;
+					const ltls_TypeSet* arguments = ltls_index_type_args(context->index, type, &argument_count);
+					uint32_t generic_count = 0;
+					const char* const* names = ltls_index_generics(context->index, base, &generic_count);
+					expected = declaration->types;
+					if (arguments && names && argument_count == generic_count)
+						expected = ltls_index_substitute(context->index, expected, names, arguments, argument_count);
+				}
+			}
+			else if (type->kind == LTLS_TYPE_TABLE)
+			{
+				declaration = (ltls_Declaration*)ltls_index_table_field(context->index, type->node, member);
+				if (declaration) expected = declaration->types;
+			}
+
+			if (!declaration) continue;
+			if (declaration->annotation && member_name)
+			{
+				char what[160];
+				snprintf(what, sizeof(what), "assignment to %s", member_name);
+				report_mismatch(context, span, expected, types, what);
+			}
+			write_declaration(context, declaration, types);
 		}
 	}
 }
@@ -916,7 +1024,7 @@ static ltls_TypeSet analyze_expression(ltls_Context* context, lt_AstNode* node)
 
 	case LT_AST_NODE_ASSIGN: {
 		ltls_TypeSet value = analyze_expression(context, node->assign.right);
-		assign_target(context, node->assign.left, value);
+		assign_target(context, node->assign.left, value, node->assign.right ? node->assign.right->span : node->span);
 		type = value;
 	} break;
 
@@ -948,6 +1056,13 @@ static ltls_TypeSet analyze_expression(ltls_Context* context, lt_AstNode* node)
 
 		if (context->function)
 		{
+			if (context->verify)
+			{
+				ltls_TypeSet declared = ltls_index_declared_return(context->index, context->function);
+				lt_Span span = node->ret.expr ? node->ret.expr->span : node->span;
+				report_mismatch(context, span, declared, type, "return value");
+			}
+
 			ltls_TypeSet before = ltls_index_returns(context->index, context->function);
 			ltls_TypeSet after = ltls_index_add_return(context->index, context->function, type);
 			if (!ltls_type_equals(before, after)) context->changed = 1;
@@ -1219,5 +1334,20 @@ void ltls_types_build(ltls_Index* index, const lt_Analysis* analysis)
 
 		free(context.env);
 		if (!context.changed) break;
+	}
+
+	if (index->verify)
+	{
+		ltls_Context context;
+		memset(&context, 0, sizeof(context));
+		context.index = index;
+		context.analysis = analysis;
+		context.env = calloc(index->declaration_count ? index->declaration_count : 1, sizeof(ltls_TypeSet));
+		context.frame = root->chunk.scope ? root->chunk.scope->frame : 0;
+		context.verify = 1;
+
+		analyze_body(&context, &root->chunk.body);
+
+		free(context.env);
 	}
 }

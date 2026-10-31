@@ -40,7 +40,8 @@ diagnostics, file watching, or any execution/debugging.
 
 - Every request analyses the document from scratch, with a fresh VM and
   index. There is no incremental parse or cache.
-- Diagnostics are syntactic. Types never produce diagnostics.
+- Diagnostics include syntax errors and conservative type warnings for
+  annotated declarations. Warnings only appear when both sides are known.
 - Positions are UTF-16, as required by LSP.
 - The server is single-file unless the file imports another module; imports
   are resolved and analysed statically (see [typing.md](typing.md#imports)).

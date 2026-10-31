@@ -9,12 +9,16 @@ exports; other workspace files are not scanned.
 `textDocument/publishDiagnostics` is pushed on open and on every change, and
 cleared when the document closes.
 
-- Only tokenizer and parser diagnostics are reported. Types, unresolved names
-  and unused values never produce diagnostics.
+- Tokenizer/parser errors plus conservative type warnings are reported.
+- Type warnings cover call arguments, annotated return values and writes to
+  annotated members. They are emitted only when both expected and assigned
+  types are fully known; unknown or dynamic values never warn.
+- Severity is warning for type mismatches and error for syntax errors.
+- Unresolved names and unused values never produce diagnostics.
 - The parser recovers per statement, so a broken statement usually produces
   one diagnostic and the rest of the file still analyses. A dangling `.` or
   `:` reports at the operator rather than at the next line.
-- Severity is error.
+
 
 ## Document symbols
 

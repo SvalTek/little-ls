@@ -78,6 +78,12 @@ typedef struct {
 } ltls_TypedNode;
 
 typedef struct {
+	lt_Span span;
+	uint8_t severity;
+	char* message;
+} ltls_TypeDiagnostic;
+
+typedef struct {
 	const lt_Token* token;
 	char* text;
 } ltls_TokenText;
@@ -126,6 +132,8 @@ typedef struct {
 	uint32_t node_type_count;
 	ltls_TypedNode* function_returns;
 	uint32_t function_return_count;
+	ltls_TypedNode* declared_returns;
+	uint32_t declared_return_count;
 
 	/* array node -> element union (absent or null means unknown) */
 	ltls_TypedNode* array_elements;
@@ -147,6 +155,11 @@ typedef struct {
 	char** param_names;
 	uint32_t param_name_count;
 
+	/* type-checking diagnostics and one verification pass flag */
+	ltls_TypeDiagnostic* type_diagnostics;
+	uint32_t type_diagnostic_count;
+	uint8_t verify;
+
 	/* text for synthetic tokens created from doc shapes */
 	ltls_TokenText* token_texts;
 	uint32_t token_text_count;
@@ -167,6 +180,7 @@ typedef struct {
 
 /* Walks the analysis tree once. Read-only: scopes are not modified. */
 void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis);
+void ltls_index_build_verifying(ltls_Index* index, const lt_Analysis* analysis);
 void ltls_index_free(ltls_Index* index);
 
 /* Infers expression and declaration types (called by ltls_index_build). */
@@ -210,6 +224,9 @@ uint8_t ltls_type_equals(ltls_TypeSet left, ltls_TypeSet right);
 void ltls_index_set_type(ltls_Index* index, lt_AstNode* node, ltls_TypeSet types);
 ltls_TypeSet ltls_index_returns(const ltls_Index* index, lt_AstNode* node);
 ltls_TypeSet ltls_index_add_return(ltls_Index* index, lt_AstNode* node, ltls_TypeSet types);
+void ltls_index_set_declared_return(ltls_Index* index, lt_AstNode* node, ltls_TypeSet types);
+ltls_TypeSet ltls_index_declared_return(const ltls_Index* index, lt_AstNode* node);
+void ltls_index_add_type_diagnostic(ltls_Index* index, lt_Span span, uint8_t severity, const char* message);
 
 /* Array values carry their element union: annotations `T[]`, literals and
    element-preserving producers. `element` null means unknown. */

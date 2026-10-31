@@ -765,9 +765,8 @@ static ltls_Declaration* member_declaration_named(ltls_Index* index, lt_AstNode*
 	return 0;
 }
 
-void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis)
+static void build_index(ltls_Index* index, const lt_Analysis* analysis)
 {
-	memset(index, 0, sizeof(ltls_Index));
 	index->tokens = &analysis->tokens;
 	index->source = analysis->source;
 	index->analysis = analysis;
@@ -784,6 +783,19 @@ void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis)
 	seed_std_symbols(index);
 	ltls_index_preload_imports(index);
 	ltls_types_build(index, analysis);
+}
+
+void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis)
+{
+	memset(index, 0, sizeof(ltls_Index));
+	build_index(index, analysis);
+}
+
+void ltls_index_build_verifying(ltls_Index* index, const lt_Analysis* analysis)
+{
+	memset(index, 0, sizeof(ltls_Index));
+	index->verify = 1;
+	build_index(index, analysis);
 }
 
 void ltls_index_free(ltls_Index* index)
@@ -820,6 +832,9 @@ void ltls_index_free(ltls_Index* index)
 
 	free(index->node_types);
 	free(index->function_returns);
+	free(index->declared_returns);
+	for (uint32_t i = 0; i < index->type_diagnostic_count; i++) free(index->type_diagnostics[i].message);
+	free(index->type_diagnostics);
 	free(index->declarations);
 	free(index->references);
 	memset(index, 0, sizeof(ltls_Index));
@@ -965,6 +980,57 @@ ltls_TypeSet ltls_index_add_return(ltls_Index* index, lt_AstNode* node, ltls_Typ
 	index->function_returns[index->function_return_count].types = types;
 	index->function_return_count++;
 	return types;
+}
+
+void ltls_index_set_declared_return(ltls_Index* index, lt_AstNode* node, ltls_TypeSet types)
+{
+	for (uint32_t i = 0; i < index->declared_return_count; i++)
+	{
+		if (index->declared_returns[i].node != node) continue;
+		index->declared_returns[i].types = ltls_type_union(index, index->declared_returns[i].types, types);
+		return;
+	}
+
+	ltls_TypedNode* items = realloc(index->declared_returns, sizeof(ltls_TypedNode) * (index->declared_return_count + 1));
+	if (!items) return;
+	index->declared_returns = items;
+	index->declared_returns[index->declared_return_count].node = node;
+	index->declared_returns[index->declared_return_count].types = types;
+	index->declared_return_count++;
+}
+
+ltls_TypeSet ltls_index_declared_return(const ltls_Index* index, lt_AstNode* node)
+{
+	for (uint32_t i = 0; i < index->declared_return_count; i++)
+		if (index->declared_returns[i].node == node) return index->declared_returns[i].types;
+	return 0;
+}
+
+void ltls_index_add_type_diagnostic(ltls_Index* index, lt_Span span, uint8_t severity, const char* message)
+{
+	if (!message) return;
+
+	for (uint32_t i = 0; i < index->type_diagnostic_count; i++)
+	{
+		ltls_TypeDiagnostic* existing = &index->type_diagnostics[i];
+		if (existing->span.start == span.start && existing->span.end == span.end &&
+		    strcmp(existing->message, message) == 0) return;
+	}
+
+	ltls_TypeDiagnostic* items = realloc(index->type_diagnostics,
+		sizeof(ltls_TypeDiagnostic) * (index->type_diagnostic_count + 1));
+	if (!items) return;
+
+	size_t length = strlen(message);
+	char* copy = malloc(length + 1);
+	if (!copy) return;
+	memcpy(copy, message, length + 1);
+
+	index->type_diagnostics = items;
+	index->type_diagnostics[index->type_diagnostic_count].span = span;
+	index->type_diagnostics[index->type_diagnostic_count].severity = severity;
+	index->type_diagnostics[index->type_diagnostic_count].message = copy;
+	index->type_diagnostic_count++;
 }
 
 static uint8_t span_covers(lt_Span span, uint32_t offset)
