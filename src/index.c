@@ -58,6 +58,7 @@ static void add_declaration(ltls_Index* index, lt_Token* name, lt_Span span, lt_
 	declaration.detail = 0;
 	declaration.kind = kind;
 	declaration.is_global = is_global;
+	declaration.from_doc = 0;
 	push_declaration(index, declaration);
 }
 
@@ -390,6 +391,9 @@ static lt_AstNode* synthetic_class(ltls_Index* index)
 
 /* `@class Name [: Base]` with `@field type name` members becomes a real class
    node and field declarations, so the existing member lookup handles it. */
+static ltls_Declaration* find_class_declaration(ltls_Index* index, const char* name);
+static ltls_Declaration* member_declaration_named(ltls_Index* index, lt_AstNode* class_node, const char* name);
+
 static void build_doc_shapes(ltls_Index* index)
 {
 	const char* source = index->source;
@@ -420,10 +424,25 @@ static void build_doc_shapes(ltls_Index* index)
 			continue;
 		}
 
-		lt_Token* name = synthetic_token(index, doc.class_span, doc.class_line, doc.class_col, doc.class_name);
-		lt_AstNode* klass = synthetic_class(index);
-		if (name && klass)
+		/* A `@class` above an existing class describes it rather than defining
+		   a second, empty shape. */
+		ltls_Declaration* existing = find_class_declaration(index, doc.class_name);
+		lt_AstNode* klass = existing ? existing->node : synthetic_class(index);
+		if (!klass)
 		{
+			ltls_doc_free(&doc);
+			continue;
+		}
+
+		if (!existing)
+		{
+			lt_Token* name = synthetic_token(index, doc.class_span, doc.class_line, doc.class_col, doc.class_name);
+			if (!name)
+			{
+				ltls_doc_free(&doc);
+				continue;
+			}
+
 			klass->class_decl.identifier = name;
 			klass->span = doc.class_span;
 
@@ -431,22 +450,61 @@ static void build_doc_shapes(ltls_Index* index)
 				klass->class_decl.superclass = synthetic_token(index, doc.class_span, doc.class_line, doc.class_col, doc.class_base);
 
 			add_declaration(index, name, doc.class_span, 0, klass, 0, LTLS_DECL_CLASS, 0);
+		}
 
-			for (uint32_t f = 0; f < doc.field_count; f++)
+		for (uint32_t f = 0; f < doc.field_count; f++)
+		{
+			ltls_DocField* field = &doc.fields[f];
+			ltls_Declaration* declaration = member_declaration_named(index, klass, field->name);
+
+			if (declaration)
 			{
-				ltls_DocField* field = &doc.fields[f];
-				lt_Token* field_token = synthetic_token(index, field->name_span, field->line, field->col, field->name);
-				if (!field_token) continue;
-
-				add_declaration(index, field_token, field->name_span, 0, klass, 0, LTLS_DECL_FIELD, 0);
-				ltls_Declaration* declaration = &index->declarations[index->declaration_count - 1];
-				declaration->annotation = copy_text(field->type);
-				if (field->description && field->description[0]) declaration->detail = copy_text(field->description);
+				/* Documenting a declared member: add its type and description. */
+				if (!declaration->annotation && field->type) declaration->annotation = copy_text(field->type);
+				if (!declaration->detail && field->description && field->description[0])
+					declaration->detail = copy_text(field->description);
+				continue;
 			}
+
+			lt_Token* field_token = synthetic_token(index, field->name_span, field->line, field->col, field->name);
+			if (!field_token) continue;
+
+			add_declaration(index, field_token, field->name_span, 0, klass, 0, LTLS_DECL_FIELD, 0);
+			declaration = &index->declarations[index->declaration_count - 1];
+			declaration->annotation = copy_text(field->type);
+			if (field->description && field->description[0]) declaration->detail = copy_text(field->description);
+			declaration->from_doc = 1;
 		}
 
 		ltls_doc_free(&doc);
 	}
+}
+
+static ltls_Declaration* find_class_declaration(ltls_Index* index, const char* name)
+{
+	for (uint32_t i = 0; i < index->declaration_count; i++)
+	{
+		ltls_Declaration* declaration = &index->declarations[i];
+		if (declaration->kind != LTLS_DECL_CLASS || !declaration->node) continue;
+
+		const char* candidate = token_text(index, declaration->name);
+		if (candidate && strcmp(candidate, name) == 0) return declaration;
+	}
+	return 0;
+}
+
+static ltls_Declaration* member_declaration_named(ltls_Index* index, lt_AstNode* class_node, const char* name)
+{
+	for (uint32_t i = 0; i < index->declaration_count; i++)
+	{
+		ltls_Declaration* declaration = &index->declarations[i];
+		if (declaration->node != class_node) continue;
+		if (declaration->kind < LTLS_DECL_FIELD || declaration->kind > LTLS_DECL_PROPERTY) continue;
+
+		const char* candidate = token_text(index, declaration->name);
+		if (candidate && strcmp(candidate, name) == 0) return declaration;
+	}
+	return 0;
 }
 
 void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis)
@@ -455,11 +513,15 @@ void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis)
 	index->tokens = &analysis->tokens;
 	index->source = analysis->source;
 
-	build_doc_shapes(index);
+	if (!analysis->parser.root)
+	{
+		build_doc_shapes(index);
+		return;
+	}
 
-	if (!analysis->parser.root) return;
 	lt_AstNode* root = analysis->parser.root;
 	walk_body(index, &root->chunk.body, root->chunk.scope, 0, 0, 0);
+	build_doc_shapes(index);
 	ltls_types_build(index, analysis);
 }
 

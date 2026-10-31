@@ -449,9 +449,41 @@ async function main() {
   const shapeParam = await waitFor((message) => message.id === 33, "shape param hover");
   assert.match(shapeParam.result.contents.value, /param options: Options/);
 
-  send({ jsonrpc: "2.0", id: 34, method: "shutdown" });
-  const shutdown = await waitFor((message) => message.id === 34, "shutdown");
-  assert.equal(shutdown.result, null);
+  assert.doesNotMatch(shapeField.result.contents.value, /class Options/);
+
+  const linkedUri = "file:///test/linked.little";
+  const linkedSource = [
+    ";; @class Known",
+    ";; @field number size the size",
+    "class Known {",
+    "  size",
+    "}",
+    "var k = Known()",
+    "io.print(k.size)",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: linkedUri, languageId: "little", version: 1, text: linkedSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === linkedUri, "linked diagnostics");
+
+  send({ jsonrpc: "2.0", id: 35, method: "textDocument/hover", params: { textDocument: { uri: linkedUri }, position: { line: 2, character: 7 } } });
+  const linkedClass = await waitFor((message) => message.id === 35, "linked class hover");
+  assert.ok(linkedClass.result);
+  const classValue = linkedClass.result.contents.value;
+  assert.equal(classValue.split("class Known").length - 1, 1, "class name rendered twice");
+  assert.match(classValue, /the size/);
+
+  send({ jsonrpc: "2.0", id: 36, method: "textDocument/definition", params: { textDocument: { uri: linkedUri }, position: { line: 6, character: 12 } } });
+  const linkedDefinition = await waitFor((message) => message.id === 36, "linked definition");
+  assert.equal(linkedDefinition.result.range.start.line, 3);
+  assert.equal(linkedDefinition.result.range.start.character, 2);
+
+  send({ jsonrpc: "2.0", id: 37, method: "shutdown" });
+  const finalShutdown = await waitFor((message) => message.id === 37, "shutdown");
+  assert.equal(finalShutdown.result, null);
 
   send({ jsonrpc: "2.0", method: "exit" });
   const code = await closed;

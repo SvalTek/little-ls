@@ -49,6 +49,7 @@ typedef struct {
 	char* detail;       /* doc description for synthetic members */
 	uint8_t kind;
 	uint8_t is_global;
+	uint8_t from_doc;
 } ltls_Declaration;
 
 typedef struct {

@@ -522,7 +522,7 @@ static yyjson_mut_val* range_object(yyjson_mut_doc* document, const ltls_LineInd
 	return range;
 }
 
-static void markdown_append_docs(ltls_Markdown* markdown, const ltls_Doc* docs)
+static void markdown_append_docs(ltls_Markdown* markdown, const ltls_Doc* docs, const char* suppress_class)
 {
 	if (docs->description && docs->description[0])
 	{
@@ -531,7 +531,7 @@ static void markdown_append_docs(ltls_Markdown* markdown, const ltls_Doc* docs)
 		markdown_append(markdown, "\n");
 	}
 
-	if (docs->class_name)
+	if (docs->class_name && !(suppress_class && strcmp(suppress_class, docs->class_name) == 0))
 	{
 		markdown_append(markdown, "\nclass ");
 		markdown_append(markdown, docs->class_name);
@@ -635,14 +635,19 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 		ltls_TypeSet override = (reference && !reference->member) ? reference->types : 0;
 		char* signature = ltls_declaration_signature(&state.index, declaration, override);
 		ltls_Doc docs;
-		uint8_t has_docs = declaration->name->line > 0 &&
+		uint8_t has_docs = !declaration->from_doc && declaration->name->line > 0 &&
 			ltls_doc_for_line(&state.analysis.tokens, declaration->name->line, &docs);
 
 		ltls_Markdown markdown = { 0 };
 		markdown_append(&markdown, "```little\n");
 		markdown_append(&markdown, signature ? signature : "");
 		markdown_append(&markdown, "\n```\n");
-		if (has_docs) markdown_append_docs(&markdown, &docs);
+		if (has_docs)
+		{
+			const char* own_class = declaration->kind == LTLS_DECL_CLASS
+				? ltls_index_token_text(&state.index, declaration->name) : 0;
+			markdown_append_docs(&markdown, &docs, own_class);
+		}
 		if (declaration->detail)
 		{
 			markdown_append(&markdown, "\n\n");
