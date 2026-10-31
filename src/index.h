@@ -29,8 +29,8 @@ typedef struct {
 	lt_Token* token;
 	lt_Scope* scope;
 	lt_AstNode* class_node;
+	lt_AstNode* receiver_expr;
 	uint8_t member;
-	uint8_t in_with;
 } ltls_Reference;
 
 typedef struct {

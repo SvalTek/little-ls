@@ -52,7 +52,7 @@ static void add_declaration(ltls_Index* index, lt_Token* name, lt_Span span, lt_
 }
 
 static void add_reference(ltls_Index* index, lt_Token* token, lt_Scope* scope, lt_AstNode* class_node,
-                          uint8_t member, uint8_t in_with)
+                          lt_AstNode* receiver_expr, uint8_t member)
 {
 	if (!token || is_synthetic(token)) return;
 
@@ -60,17 +60,19 @@ static void add_reference(ltls_Index* index, lt_Token* token, lt_Scope* scope, l
 	reference.token = token;
 	reference.scope = scope;
 	reference.class_node = class_node;
+	reference.receiver_expr = receiver_expr;
 	reference.member = member;
-	reference.in_with = in_with;
 	push_reference(index, reference);
 }
 
-static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_AstNode* class_node, uint8_t in_with);
+static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_AstNode* class_node,
+                      lt_Token* receiver_token, lt_AstNode* receiver_expr);
 
-static void walk_body(ltls_Index* index, lt_Buffer* body, lt_Scope* scope, lt_AstNode* class_node, uint8_t in_with)
+static void walk_body(ltls_Index* index, lt_Buffer* body, lt_Scope* scope, lt_AstNode* class_node,
+                      lt_Token* receiver_token, lt_AstNode* receiver_expr)
 {
 	for (uint32_t i = 0; i < body->length; i++)
-		walk_node(index, *AT(lt_AstNode*, *body, i), scope, class_node, in_with);
+		walk_node(index, *AT(lt_AstNode*, *body, i), scope, class_node, receiver_token, receiver_expr);
 }
 
 static void walk_class_member(ltls_Index* index, lt_AstNode* klass, lt_ClassMember* member, lt_Scope* scope)
@@ -89,18 +91,30 @@ static void walk_class_member(ltls_Index* index, lt_AstNode* klass, lt_ClassMemb
 	lt_Span span = member->value ? member->value->span : member->name->span;
 	add_declaration(index, member->name, span, scope, klass, member, kind, 0);
 
-	if (member->value)
-		walk_node(index, member->value, scope, klass, 0);
+	if (!member->value) return;
+
+	/* Class members receive the instance as their first argument; that token is
+	   the active receiver for `@name` inside the member. */
+	lt_Token* receiver = 0;
+	if (member->value->type == LT_AST_NODE_FN) receiver = member->value->fn.args[0];
+	walk_node(index, member->value, scope, klass, receiver, 0);
 }
 
-static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_AstNode* class_node, uint8_t in_with)
+static uint8_t is_name_token(const lt_Token* token)
+{
+	return token && (token->type == LT_TOKEN_IDENTIFIER || (token->type >= LT_TOKEN_FN && token->type <= LT_TOKEN_RETURN));
+}
+
+static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_AstNode* class_node,
+                      lt_Token* receiver_token, lt_AstNode* receiver_expr)
 {
 	if (!node) return;
 
 	switch (node->type)
 	{
 	case LT_AST_NODE_CHUNK:
-		walk_body(index, &node->chunk.body, node->chunk.scope ? node->chunk.scope : scope, class_node, in_with);
+		walk_body(index, &node->chunk.body, node->chunk.scope ? node->chunk.scope : scope,
+			class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_DECLARE:
@@ -116,7 +130,7 @@ static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_A
 			add_declaration(index, entry->local, entry->local ? entry->local->span : node->span, scope, node, 0,
 				LTLS_DECL_LOCAL, node->declare.is_global);
 		}
-		walk_node(index, node->declare.expr, scope, class_node, in_with);
+		walk_node(index, node->declare.expr, scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_CLASS:
@@ -133,20 +147,35 @@ static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_A
 			if (!argument) break;
 			add_declaration(index, argument, argument->span, fn_scope, node, 0, LTLS_DECL_PARAM, 0);
 		}
-		walk_body(index, &node->fn.body, fn_scope, class_node, in_with);
+
+		/* The parser only replaces the receiver when a function declares `this`
+		   as its first parameter; otherwise nested functions inherit it. */
+		lt_Token* fn_receiver = receiver_token;
+		lt_AstNode* fn_receiver_expr = receiver_expr;
+		const char* first_name = token_text(index, node->fn.args[0]);
+		if (first_name && strcmp(first_name, "this") == 0)
+		{
+			fn_receiver = node->fn.args[0];
+			fn_receiver_expr = 0;
+		}
+
+		walk_body(index, &node->fn.body, fn_scope, class_node, fn_receiver, fn_receiver_expr);
 	} break;
 
 	case LT_AST_NODE_WITH:
-		walk_node(index, node->with_stmt.expr, scope, class_node, in_with);
-		walk_body(index, &node->with_stmt.body, node->with_stmt.scope ? node->with_stmt.scope : scope, class_node, 1);
+		walk_node(index, node->with_stmt.expr, scope, class_node, receiver_token, receiver_expr);
+		/* `with` swaps the active receiver for the block; the meaning of `@` is
+		   unchanged, and the outer receiver returns afterwards. */
+		walk_body(index, &node->with_stmt.body, node->with_stmt.scope ? node->with_stmt.scope : scope,
+			class_node, node->with_stmt.receiver, node->with_stmt.expr);
 		break;
 
 	case LT_AST_NODE_IF:
 	case LT_AST_NODE_ELSEIF:
 	case LT_AST_NODE_ELSE:
-		walk_node(index, node->branch.expr, scope, class_node, in_with);
-		walk_body(index, &node->branch.body, scope, class_node, in_with);
-		walk_node(index, node->branch.next, scope, class_node, in_with);
+		walk_node(index, node->branch.expr, scope, class_node, receiver_token, receiver_expr);
+		walk_body(index, &node->branch.body, scope, class_node, receiver_token, receiver_expr);
+		walk_node(index, node->branch.next, scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_FOR: {
@@ -156,13 +185,13 @@ static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_A
 			lt_Token* variable = *AT(lt_Token*, frame->frame_slots, node->loop.identifier);
 			if (variable) add_declaration(index, variable, variable->span, scope, node, 0, LTLS_DECL_LOCAL, 0);
 		}
-		walk_node(index, node->loop.iterator, scope, class_node, in_with);
-		walk_body(index, &node->loop.body, scope, class_node, in_with);
+		walk_node(index, node->loop.iterator, scope, class_node, receiver_token, receiver_expr);
+		walk_body(index, &node->loop.body, scope, class_node, receiver_token, receiver_expr);
 	} break;
 
 	case LT_AST_NODE_WHILE:
-		walk_node(index, node->loop.iterator, scope, class_node, in_with);
-		walk_body(index, &node->loop.body, scope, class_node, in_with);
+		walk_node(index, node->loop.iterator, scope, class_node, receiver_token, receiver_expr);
+		walk_body(index, &node->loop.body, scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_INDEX: {
@@ -172,58 +201,75 @@ static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_A
 		if (source && source->type == LT_AST_NODE_IDENTIFIER)
 		{
 			const char* name = token_text(index, source->identifier.token);
-			if (name && strcmp(name, "this") == 0)
+			uint8_t is_receiver = receiver_token && source->identifier.token == receiver_token;
+			uint8_t is_this = name && strcmp(name, "this") == 0;
+
+			if (is_receiver || is_this)
 			{
 				lt_Token* field = 0;
 				if (idx && idx->type == LT_AST_NODE_LITERAL) field = idx->literal.token;
 				else if (idx && idx->type == LT_AST_NODE_IDENTIFIER) field = idx->identifier.token;
-				if (field) add_reference(index, field, scope, class_node, 1, in_with);
+
+				/* `this.name` always means the instance; `@name` means whichever
+				   receiver is active, which `with` changes. */
+				lt_AstNode* target = is_receiver ? receiver_expr : 0;
+				if (field) add_reference(index, field, scope, class_node, target, 1);
 				break;
 			}
 		}
 
-		walk_node(index, source, scope, class_node, in_with);
-		if (!idx || idx->type != LT_AST_NODE_LITERAL) walk_node(index, idx, scope, class_node, in_with);
+		walk_node(index, source, scope, class_node, receiver_token, receiver_expr);
+		if (!idx || idx->type != LT_AST_NODE_LITERAL)
+			walk_node(index, idx, scope, class_node, receiver_token, receiver_expr);
 	} break;
 
 	case LT_AST_NODE_CALL:
-		walk_node(index, node->call.callee, scope, class_node, in_with);
+		walk_node(index, node->call.callee, scope, class_node, receiver_token, receiver_expr);
 		for (uint8_t i = 0; i <= LT_MAX_CALL_ARGS + 1; i++)
-			walk_node(index, node->call.args[i], scope, class_node, in_with);
+			walk_node(index, node->call.args[i], scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_BINARYOP:
-		walk_node(index, node->binary_op.left, scope, class_node, in_with);
-		walk_node(index, node->binary_op.right, scope, class_node, in_with);
+		walk_node(index, node->binary_op.left, scope, class_node, receiver_token, receiver_expr);
+		walk_node(index, node->binary_op.right, scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_UNARYOP:
-		walk_node(index, node->unary_op.expr, scope, class_node, in_with);
+		walk_node(index, node->unary_op.expr, scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_ASSIGN:
-		walk_node(index, node->assign.left, scope, class_node, in_with);
-		walk_node(index, node->assign.right, scope, class_node, in_with);
+		walk_node(index, node->assign.left, scope, class_node, receiver_token, receiver_expr);
+		walk_node(index, node->assign.right, scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_AWAIT:
-		walk_node(index, node->await.expr, scope, class_node, in_with);
+		walk_node(index, node->await.expr, scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_RETURN:
-		walk_node(index, node->ret.expr, scope, class_node, in_with);
+		walk_node(index, node->ret.expr, scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_ARRAY:
-		walk_body(index, &node->array.values, scope, class_node, in_with);
+		walk_body(index, &node->array.values, scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_TABLE:
-		walk_body(index, &node->table.values, scope, class_node, in_with);
+		/* Literal keys are declarations so a `with { ... }` receiver can resolve
+		   its own `@name` references. */
+		for (uint32_t i = 0; i < node->table.keys.length; i++)
+		{
+			lt_AstNode* key = *AT(lt_AstNode*, node->table.keys, i);
+			if (key && key->type == LT_AST_NODE_LITERAL && is_name_token(key->literal.token))
+				add_declaration(index, key->literal.token, key->literal.token->span, scope, node, 0,
+					LTLS_DECL_FIELD, 0);
+		}
+		walk_body(index, &node->table.values, scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_IDENTIFIER:
-		add_reference(index, node->identifier.token, scope, class_node, 0, in_with);
+		add_reference(index, node->identifier.token, scope, class_node, 0, 0);
 		break;
 
 	default:
@@ -239,7 +285,7 @@ void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis)
 
 	if (!analysis->parser.root) return;
 	lt_AstNode* root = analysis->parser.root;
-	walk_body(index, &root->chunk.body, root->chunk.scope, 0, 0);
+	walk_body(index, &root->chunk.body, root->chunk.scope, 0, 0, 0);
 }
 
 void ltls_index_free(ltls_Index* index)
@@ -321,6 +367,46 @@ static const ltls_Declaration* resolve_member(const ltls_Index* index, lt_AstNod
 	return 0;
 }
 
+/* `@name` resolves against the active receiver. When that receiver is a table
+   literal, or a local initialized with one, its keys are the members. */
+static const ltls_Declaration* resolve_receiver(const ltls_Index* index, lt_AstNode* expression, lt_Token* token, uint32_t depth)
+{
+	if (!expression || depth > 4) return 0;
+
+	if (expression->type == LT_AST_NODE_TABLE)
+	{
+		for (uint32_t i = 0; i < index->declaration_count; i++)
+		{
+			const ltls_Declaration* declaration = &index->declarations[i];
+			if (declaration->kind == LTLS_DECL_FIELD && declaration->node == expression &&
+				declaration->name->idx == token->idx)
+				return declaration;
+		}
+		return 0;
+	}
+
+	if (expression->type == LT_AST_NODE_IDENTIFIER)
+	{
+		lt_Token* base = expression->identifier.token;
+		for (uint32_t i = 0; i < index->reference_count; i++)
+		{
+			const ltls_Reference* reference = &index->references[i];
+			if (reference->token != base || reference->member) continue;
+
+			const ltls_Declaration* target = resolve_lexical(index, reference->scope, base);
+			if (!target) target = resolve_global(index, base);
+			if (!target) return 0;
+
+			/* Only a plain `var x = <expr>` initializer can be followed. */
+			if (target->node && target->node->type == LT_AST_NODE_DECLARE)
+				return resolve_receiver(index, target->node->declare.expr, token, depth + 1);
+			return 0;
+		}
+	}
+
+	return 0;
+}
+
 const ltls_Declaration* ltls_index_resolve(const ltls_Index* index, uint32_t offset, const ltls_Reference** reference)
 {
 	if (reference) *reference = 0;
@@ -336,7 +422,8 @@ const ltls_Declaration* ltls_index_resolve(const ltls_Index* index, uint32_t off
 		if (reference) *reference = candidate;
 		if (candidate->member)
 		{
-			if (candidate->in_with) return 0;
+			if (candidate->receiver_expr)
+				return resolve_receiver(index, candidate->receiver_expr, candidate->token, 0);
 			return resolve_member(index, candidate->class_node, candidate->token);
 		}
 

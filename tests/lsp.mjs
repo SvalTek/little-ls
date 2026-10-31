@@ -218,8 +218,66 @@ async function main() {
   const memberHover = await waitFor((message) => message.id === 9, "member hover");
   assert.match(memberHover.result.contents.value, /field value/);
 
-  send({ jsonrpc: "2.0", id: 10, method: "shutdown" });
-  const shutdown = await waitFor((message) => message.id === 10, "shutdown");
+  const withUri = "file:///test/with.little";
+  const withSource = [
+    "var config = { baseUrl: \"localhost\" }",
+    "with config {",
+    "  io.print(@baseUrl)",
+    "}",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: withUri, languageId: "little", version: 1, text: withSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === withUri, "with diagnostics");
+
+  send({ jsonrpc: "2.0", id: 10, method: "textDocument/hover", params: { textDocument: { uri: withUri }, position: { line: 2, character: 13 } } });
+  const withHover = await waitFor((message) => message.id === 10, "with hover");
+  assert.match(withHover.result.contents.value, /field baseUrl/);
+
+  send({ jsonrpc: "2.0", id: 11, method: "textDocument/definition", params: { textDocument: { uri: withUri }, position: { line: 2, character: 13 } } });
+  const withDefinition = await waitFor((message) => message.id === 11, "with definition");
+  assert.equal(withDefinition.result.range.start.line, 0);
+  assert.equal(withDefinition.result.range.start.character, 15);
+  assert.equal(withDefinition.result.range.end.character, 22);
+
+  const nestedUri = "file:///test/nested.little";
+  const nestedSource = [
+    "with { a: 1 } {",
+    "  with { b: 2 } {",
+    "    io.print(@b)",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: nestedUri, languageId: "little", version: 1, text: nestedSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === nestedUri, "nested diagnostics");
+
+  send({ jsonrpc: "2.0", id: 12, method: "textDocument/hover", params: { textDocument: { uri: nestedUri }, position: { line: 2, character: 14 } } });
+  const nestedHover = await waitFor((message) => message.id === 12, "nested hover");
+  assert.match(nestedHover.result.contents.value, /field b/);
+
+  const unknownUri = "file:///test/unknown.little";
+  const unknownSource = "fn f(config) {\n  with config {\n    io.print(@baseUrl)\n  }\n}\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: unknownUri, languageId: "little", version: 1, text: unknownSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === unknownUri, "unknown diagnostics");
+
+  send({ jsonrpc: "2.0", id: 13, method: "textDocument/hover", params: { textDocument: { uri: unknownUri }, position: { line: 2, character: 14 } } });
+  const unknownHover = await waitFor((message) => message.id === 13, "unknown hover");
+  assert.equal(unknownHover.result, null);
+
+  send({ jsonrpc: "2.0", id: 14, method: "shutdown" });
+  const shutdown = await waitFor((message) => message.id === 14, "shutdown");
   assert.equal(shutdown.result, null);
 
   send({ jsonrpc: "2.0", method: "exit" });
