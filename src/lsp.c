@@ -1459,6 +1459,29 @@ static yyjson_mut_val* location_object(yyjson_mut_doc* document, const ltls_Line
 	return location;
 }
 
+/* Location inside another file, reconstructed from the stored origin. */
+static yyjson_mut_val* origin_location(yyjson_mut_doc* document, const ltls_Declaration* declaration)
+{
+	uint32_t line = declaration->origin_line ? declaration->origin_line - 1 : 0;
+	uint32_t character = declaration->origin_col;
+	uint32_t end = character + declaration->origin_length;
+
+	yyjson_mut_val* start = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_int(document, start, "line", line);
+	yyjson_mut_obj_add_int(document, start, "character", character);
+	yyjson_mut_val* stop = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_int(document, stop, "line", line);
+	yyjson_mut_obj_add_int(document, stop, "character", end);
+	yyjson_mut_val* range = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_val(document, range, "start", start);
+	yyjson_mut_obj_add_val(document, range, "end", stop);
+
+	yyjson_mut_val* location = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_strcpy(document, location, "uri", declaration->origin_uri);
+	yyjson_mut_obj_add_val(document, location, "range", range);
+	return location;
+}
+
 static yyjson_mut_val* build_references(yyjson_mut_doc* document, void* context)
 {
 	ltls_SymbolContext* symbol = context;
@@ -1479,7 +1502,9 @@ static yyjson_mut_val* build_references(yyjson_mut_doc* document, void* context)
 		ltls_ReferenceList list;
 		collect_references(&state.index, declaration, &list);
 
-		if (symbol->include_declaration)
+		if (symbol->include_declaration && declaration->origin_uri)
+			yyjson_mut_arr_add_val(locations, origin_location(document, declaration));
+		else if (symbol->include_declaration && !(declaration->name->flags & LT_TOKEN_SYNTHETIC))
 			yyjson_mut_arr_add_val(locations,
 				location_object(document, &state.lines, text, position->document->uri, declaration->name->span));
 
@@ -1513,7 +1538,7 @@ static yyjson_mut_val* build_highlights(yyjson_mut_doc* document, void* context)
 
 		uint32_t count = 0;
 		lt_Span spans[2049];
-		spans[count++] = declaration->name->span;
+		if (!(declaration->name->flags & LT_TOKEN_SYNTHETIC)) spans[count++] = declaration->name->span;
 		for (uint32_t i = 0; i < list.count && count < 2049; i++) spans[count++] = list.items[i]->token->span;
 
 		for (uint32_t i = 0; i < count; i++)
