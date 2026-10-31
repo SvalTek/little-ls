@@ -116,6 +116,27 @@ static lt_Token* member_token(lt_AstNode* idx)
 	return 0;
 }
 
+static const ltls_Declaration* resolve_member(const ltls_Index* index, lt_AstNode* class_node, lt_Token* token);
+
+/* `this.name = ...` (including `@name` constructor parameters) creates a field
+   even when the class body does not declare it. */
+static void ensure_implicit_member(ltls_Index* index, lt_AstNode* target, lt_AstNode* class_node, lt_Scope* scope)
+{
+	if (!target || target->type != LT_AST_NODE_INDEX || !class_node) return;
+
+	lt_AstNode* source = target->index.source;
+	if (!source || source->type != LT_AST_NODE_IDENTIFIER) return;
+
+	const char* name = token_text(index, source->identifier.token);
+	if (!name || strcmp(name, "this") != 0) return;
+
+	lt_Token* member = member_token(target->index.idx);
+	if (!member || !is_name_token(member)) return;
+	if (resolve_member(index, class_node, member)) return;
+
+	add_declaration(index, member, member->span, scope, class_node, 0, LTLS_DECL_FIELD, 0);
+}
+
 static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_AstNode* class_node,
                       lt_Token* receiver_token, lt_AstNode* receiver_expr)
 {
@@ -257,6 +278,7 @@ static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_A
 		break;
 
 	case LT_AST_NODE_ASSIGN:
+		ensure_implicit_member(index, node->assign.left, class_node, scope);
 		walk_node(index, node->assign.left, scope, class_node, receiver_token, receiver_expr);
 		walk_node(index, node->assign.right, scope, class_node, receiver_token, receiver_expr);
 		break;
@@ -489,8 +511,9 @@ static const ltls_Declaration* resolve_member(const ltls_Index* index, lt_AstNod
 	for (uint32_t i = 0; i < index->declaration_count; i++)
 	{
 		const ltls_Declaration* declaration = &index->declarations[i];
-		if (declaration->member && declaration->node == class_node && declaration->name->idx == token->idx)
-			return declaration;
+		if (declaration->node != class_node) continue;
+		if (declaration->kind < LTLS_DECL_FIELD || declaration->kind > LTLS_DECL_PROPERTY) continue;
+		if (declaration->name->idx == token->idx) return declaration;
 	}
 	return 0;
 }

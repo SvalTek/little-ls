@@ -331,8 +331,21 @@ async function main() {
   const stringHover = await waitFor((message) => message.id === 20, "string hover");
   assert.match(stringHover.result.contents.value, /var x: string/);
 
-  send({ jsonrpc: "2.0", id: 21, method: "shutdown" });
-  const shutdown = await waitFor((message) => message.id === 21, "shutdown");
+  const namedUri = "file:///test/named.little";
+  const namedSource = "class Named {\n  constructor(@label) {\n  }\n}\nvar n = Named(\"x\")\nio.print(n.label)\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: namedUri, languageId: "little", version: 1, text: namedSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === namedUri, "named diagnostics");
+
+  send({ jsonrpc: "2.0", id: 22, method: "textDocument/hover", params: { textDocument: { uri: namedUri }, position: { line: 5, character: 12 } } });
+  const implicitHover = await waitFor((message) => message.id === 22, "implicit field hover");
+  assert.match(implicitHover.result.contents.value, /field label/);
+
+  send({ jsonrpc: "2.0", id: 23, method: "shutdown" });
+  const shutdown = await waitFor((message) => message.id === 23, "shutdown");
   assert.equal(shutdown.result, null);
 
   send({ jsonrpc: "2.0", method: "exit" });
