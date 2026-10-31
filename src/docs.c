@@ -334,6 +334,24 @@ static void parse_annotation(ltls_Doc* doc, const char* text, size_t length, con
 		return;
 	}
 
+	if (tag_length == 6 && memcmp(tag_start, "struct", 6) == 0)
+	{
+		const char* cursor = tag_end;
+		lt_Span name_span = { 0, 0 };
+		char* name = next_word_at(&cursor, end, source, &name_span);
+		if (!name)
+		{
+			push_tag(doc, text, length);
+			return;
+		}
+
+		doc->struct_name = name;
+		doc->struct_span = name_span;
+		doc->struct_line = line;
+		doc->struct_col = (uint16_t)(name_span.start - line_start);
+		return;
+	}
+
 	if (tag_length == 5 && memcmp(tag_start, "class", 5) == 0)
 	{
 		const char* cursor = tag_end;
@@ -389,9 +407,11 @@ static void parse_annotation(ltls_Doc* doc, const char* text, size_t length, con
 			return;
 		}
 
+		char* default_value = bracket_value(&cursor, end);
 		ltls_DocField field;
 		field.type = type;
 		field.name = name;
+		field.default_value = default_value;
 		field.description = rest_text(cursor, end);
 		field.name_span = name_span;
 		field.line = line;
@@ -526,11 +546,13 @@ void ltls_doc_free(ltls_Doc* doc)
 	{
 		free(doc->fields[i].type);
 		free(doc->fields[i].name);
+		free(doc->fields[i].default_value);
 		free(doc->fields[i].description);
 	}
 	free(doc->fields);
 	free(doc->class_name);
 	free(doc->class_base);
+	free(doc->struct_name);
 	for (uint32_t i = 0; i < doc->class_generic_count; i++) free(doc->class_generics[i]);
 	free(doc->class_generics);
 	for (uint32_t i = 0; i < doc->generic_count; i++) free(doc->generics[i]);

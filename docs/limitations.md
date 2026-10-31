@@ -32,9 +32,13 @@ surprising. It is not a bug list; most of these are bounded choices.
   generic receivers, and calls through dynamic receivers are unchecked.
 - Annotated declarations are authoritative: mismatched assignments warn and
   do not widen the hover type.
-- Structural matching applies only to object/table shapes: virtual `@class`
-  types and anonymous `{ ... }` shapes against tables or instances. Real
-  classes remain nominal, and function types compare by identity.
+- Structural matching applies only to object/table shapes: `@struct` types,
+  virtual `@class` types and anonymous `{ ... }` shapes against tables or
+  instances. Real classes remain nominal, and function types compare by
+  identity.
+- `@struct` is a type only: no methods, constructors, inheritance or generic
+  parameters. A struct and a class with the same name resolve to the struct
+  for annotations; duplicate struct names keep the first definition.
 - Missing expected fields fail, extra fields are accepted, and matching stops
   at a fixed depth. Anonymous-shape diagnostics render both sides as
   `table`, so the message does not name the offending field.

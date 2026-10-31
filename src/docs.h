@@ -20,6 +20,7 @@ typedef struct {
 typedef struct {
 	char* type;
 	char* name;
+	char* default_value;
 	char* description;
 	lt_Span name_span;
 	uint16_t line;
@@ -37,6 +38,10 @@ typedef struct {
 	uint32_t field_count;
 	char* class_name;
 	char* class_base;
+	char* struct_name;
+	lt_Span struct_span;
+	uint16_t struct_line;
+	uint16_t struct_col;
 	char** class_generics;
 	uint32_t class_generic_count;
 	char** generics;

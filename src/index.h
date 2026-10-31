@@ -56,6 +56,7 @@ typedef struct {
 	char* origin_uri;   /* file a cloned declaration came from */
 	uint16_t origin_line, origin_col;
 	uint16_t origin_length;
+	uint8_t optional;   /* field has a documented default */
 	uint8_t kind;
 	uint8_t is_global;
 	uint8_t from_doc;
@@ -97,6 +98,11 @@ typedef struct {
 	char* key;
 	ltls_TypeSet value;
 } ltls_ImportEntry;
+
+typedef struct {
+	char* name;
+	lt_AstNode* node;
+} ltls_Struct;
 
 typedef struct {
 	lt_AstNode* node;
@@ -150,6 +156,8 @@ typedef struct {
 	/* generic parameter names per function/class node, and instance arguments */
 	ltls_Generics* generics;
 	uint32_t generic_count;
+	ltls_Struct* structs;
+	uint32_t struct_count;
 	ltls_TypeArgs* type_args;
 	uint32_t type_args_count;
 	char** param_names;
@@ -263,6 +271,8 @@ ltls_TypeSet ltls_index_substitute(ltls_Index* index, ltls_TypeSet types, const 
 const ltls_Declaration* ltls_index_member_substituted(const ltls_Index* index, ltls_TypeSet receiver,
                                                       lt_Token* token, ltls_TypeSet* resolved);
 lt_AstNode* ltls_index_class_base(const ltls_Index* index, lt_AstNode* class_node);
+lt_AstNode* ltls_index_struct(const ltls_Index* index, const char* name);
+const char* ltls_index_struct_name(const ltls_Index* index, lt_AstNode* node);
 
 /* Renders a type set such as `LLMProvider` or `number | string`. */
 void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffer, size_t size);

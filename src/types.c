@@ -167,10 +167,19 @@ static ltls_TypeSet annotation_segment(ltls_Context* context, char* text)
 	else if (strcmp(text, "fn") == 0 || strcmp(text, "function") == 0) kind = LTLS_TYPE_FUNCTION;
 	else
 	{
-		lt_AstNode* klass = find_class(context->index, text);
-		if (!klass) return 0;
-		kind = LTLS_TYPE_INSTANCE;
-		node = klass;
+		lt_AstNode* structure = ltls_index_struct(context->index, text);
+		if (structure)
+		{
+			kind = LTLS_TYPE_TABLE;
+			node = structure;
+		}
+		else
+		{
+			lt_AstNode* klass = find_class(context->index, text);
+			if (!klass) return 0;
+			kind = LTLS_TYPE_INSTANCE;
+			node = klass;
+		}
 	}
 
 	return ltls_type_add(context->index, 0, kind, node);
@@ -364,7 +373,11 @@ static uint8_t structural_match(ltls_Index* index, lt_AstNode* expected, lt_AstN
 		if (!name) continue;
 
 		const ltls_Declaration* actual_member = owner_member(index, actual, name);
-		if (!actual_member) return 0;
+		if (!actual_member)
+		{
+			if (member->optional) continue;
+			return 0;
+		}
 		if (member->types && actual_member->types &&
 		    !types_compatible(index, member->types, actual_member->types, depth + 1)) return 0;
 	}
@@ -962,6 +975,11 @@ static ltls_TypeSet analyze_index(ltls_Context* context, lt_AstNode* node)
 	ltls_TypeSet receiver = analyze_expression(context, node->index.source);
 
 	ltls_Reference* reference = reference_for_node(context->index, node, 1);
+	if (reference && reference->member && reference->receiver_expr)
+	{
+		ltls_TypeSet active = ltls_index_type_of(context->index, reference->receiver_expr);
+		if (active) receiver = active;
+	}
 	if (reference) reference->types = receiver;
 
 	lt_Token* member = member_token(node->index.idx);

@@ -65,6 +65,7 @@ static void add_declaration(ltls_Index* index, lt_Token* name, lt_Span span, lt_
 	declaration.origin_line = 0;
 	declaration.origin_col = 0;
 	declaration.origin_length = 0;
+	declaration.optional = 0;
 	declaration.kind = kind;
 	declaration.is_global = is_global;
 	declaration.from_doc = 0;
@@ -631,6 +632,58 @@ static void seed_std_symbols(ltls_Index* index)
 static ltls_Declaration* find_class_declaration(ltls_Index* index, const char* name);
 static ltls_Declaration* member_declaration_named(ltls_Index* index, lt_AstNode* class_node, const char* name);
 
+lt_AstNode* ltls_index_struct(const ltls_Index* index, const char* name)
+{
+	if (!index || !name) return 0;
+	for (uint32_t i = 0; i < index->struct_count; i++)
+		if (strcmp(index->structs[i].name, name) == 0) return index->structs[i].node;
+	return 0;
+}
+
+const char* ltls_index_struct_name(const ltls_Index* index, lt_AstNode* node)
+{
+	if (!index || !node) return 0;
+	for (uint32_t i = 0; i < index->struct_count; i++)
+		if (index->structs[i].node == node) return index->structs[i].name;
+	return 0;
+}
+
+/* `@struct Name` with `@field type name [default]` members is a named table
+   shape: annotations use it directly, and members resolve through table fields. */
+static void build_struct(ltls_Index* index, ltls_Doc* doc)
+{
+	if (!doc->struct_name || ltls_index_struct(index, doc->struct_name)) return;
+
+	lt_AstNode* table = synthetic_node(index, LT_AST_NODE_TABLE);
+	lt_Token* name_token = synthetic_token(index, doc->struct_span, doc->struct_line, doc->struct_col, doc->struct_name);
+	if (!table || !name_token) return;
+
+	ltls_Struct* entries = realloc(index->structs, sizeof(ltls_Struct) * (index->struct_count + 1));
+	if (!entries) return;
+
+	char* name = copy_text(doc->struct_name);
+	if (!name) return;
+
+	index->structs = entries;
+	index->structs[index->struct_count].name = name;
+	index->structs[index->struct_count].node = table;
+	index->struct_count++;
+
+	for (uint32_t f = 0; f < doc->field_count; f++)
+	{
+		ltls_DocField* field = &doc->fields[f];
+		lt_Token* token = synthetic_token(index, field->name_span, field->line, field->col, field->name);
+		if (!token) continue;
+
+		add_declaration(index, token, token->span, 0, table, 0, LTLS_DECL_FIELD, 0);
+		ltls_Declaration* declaration = &index->declarations[index->declaration_count - 1];
+		declaration->annotation = copy_text(field->type);
+		if (field->description && field->description[0]) declaration->detail = copy_text(field->description);
+		declaration->optional = field->default_value != 0;
+		declaration->from_doc = 1;
+	}
+}
+
 static void build_doc_shapes(ltls_Index* index)
 {
 	const char* source = index->source;
@@ -664,6 +717,13 @@ static void build_doc_shapes(ltls_Index* index)
 		for (uint32_t t = 0; t < doc.tag_count; t++)
 			if (doc.tags[t] && strncmp(doc.tags[t], "@type ", 6) == 0)
 				register_shapes(index, doc.tags[t] + 6);
+
+		if (doc.struct_name)
+		{
+			build_struct(index, &doc);
+			ltls_doc_free(&doc);
+			continue;
+		}
 
 		if (!doc.class_name)
 		{
@@ -821,6 +881,8 @@ void ltls_index_free(ltls_Index* index)
 	free(index->imports);
 	for (uint32_t i = 0; i < index->param_name_count; i++) free(index->param_names[i]);
 	free(index->param_names);
+	for (uint32_t i = 0; i < index->struct_count; i++) free(index->structs[i].name);
+	free(index->structs);
 	for (uint32_t i = 0; i < index->generic_count; i++) { for (uint32_t j = 0; j < index->generics[i].count; j++) free(index->generics[i].names[j]); free(index->generics[i].names); }
 	free(index->generics);
 	for (uint32_t i = 0; i < index->type_args_count; i++) free(index->type_args[i].args);
@@ -2203,7 +2265,10 @@ void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffe
 		case LTLS_TYPE_STRING: name = "string"; break;
 		case LTLS_TYPE_BOOL: name = "bool"; break;
 		case LTLS_TYPE_NULL: name = "null"; break;
-		case LTLS_TYPE_TABLE: name = "table"; break;
+		case LTLS_TYPE_TABLE: {
+			const char* structure = ltls_index_struct_name(index, type->node);
+			name = structure ? structure : "table";
+		} break;
 		case LTLS_TYPE_ARRAY: name = "array"; break;
 		case LTLS_TYPE_FUNCTION: name = "fn"; break;
 		case LTLS_TYPE_PARAM: name = type->name ? type->name : "?"; break;

@@ -24,8 +24,9 @@ Recognized tags:
 |---|---|
 | `@param TYPE name [default]` | parameter type; `[value]` is an optional default |
 | `@return TYPE` | first/multi return type |
-| `@field TYPE name` | field of a `@class` shape, or documentation for a real member |
-| `@class Name [: Base]` | defines a virtual class shape (or attaches to an existing class) |
+| `@field TYPE name [default]` | field of a `@struct`/`@class` shape; `[value]` makes it optional |
+| `@struct Name` | defines a named table structure (interface-like) |
+| `@class Name [: Base]` | documents a class, or attaches docs to an existing one |
 | `@type TYPE` | type for the declaration on the next line |
 | any other line | description text shown in hover |
 
@@ -33,10 +34,44 @@ Type grammar:
 
 - primitives: `number`, `string`, `bool`/`boolean`, `table`, `array`,
   `fn`/`function`, `null`/`nil`;
-- class names, including `@class` shapes;
+- class names, `@struct` names and `@class` shapes;
 - unions with `|`, split outside braces: `string | null`;
 - structural shapes: `{ foo: boolean, bar: string }`, nestable;
 - array suffix: `number[]`, `{ ok: boolean }[]`, `string[] | null`.
+
+### Structs
+
+`@struct` defines a reusable named table structure, like a TypeScript
+interface. It is a type, never a value.
+
+```little
+;; @struct LLMProviderOpts
+;; Options for talking to a provider.
+;; @field string baseUrl The provider base URL.
+;; @field string token The token to use.
+;; @field number port ["80"] Optional port.
+
+;; @param LLMProviderOpts opts
+fn connect(opts) {
+    io.print(opts.baseUrl)
+    with opts { io.print(@baseUrl) }
+}
+
+connect({ baseUrl: "localhost" token: "none" })          ; ok, port omitted
+connect({ baseUrl: "localhost" token: "none" port: 80 }) ; ok
+```
+
+Rules:
+
+- Annotations resolve a struct name to a named table type; hover renders the
+  struct name, member access and completion use its fields, and `with` works.
+- Fields are optional when a default `[value]` is given; structural checks
+  allow such fields to be missing. Required fields must be present.
+- Extra fields are allowed by structural compatibility.
+- Structs do not have methods, constructors or inheritance.
+- `@struct` has no generic parameters yet.
+- Virtual `@class` shapes (a `@class` with no matching class) remain supported
+  for compatibility, but `@struct` is the intended form for table shapes.
 
 `?`, `any` and `unknown` mean unknown. Type text is trimmed and matched after
 trimming; two structural types that differ only in internal whitespace are
@@ -205,9 +240,9 @@ Rules:
 - A warning is emitted only when both sides are fully known. Unknown values,
   dynamic tables and unbound type variables never warn.
 - Exact alternatives win first. If none match, structural acceptance applies:
-  - a virtual `@class` shape accepts a table literal or instance whose fields
-    satisfy it (extra fields allowed, missing or mismatched fields warn);
-  - an anonymous `{ ... }` shape works the same way;
+  - a `@struct`, a virtual `@class` shape, or an anonymous `{ ... }` shape
+    accepts a table literal or instance whose fields satisfy it (extra fields
+    allowed, optional fields may be missing, mismatched fields warn);
   - `table`, `array` and `fn` are wildcards for any value of that kind;
   - real classes stay nominal: a plain table does not satisfy `Point`.
 - Arrays compare element types when both are known.
