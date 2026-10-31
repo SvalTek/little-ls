@@ -53,9 +53,11 @@ static void add_declaration(ltls_Index* index, lt_Token* name, lt_Span span, lt_
 	declaration.span = span;
 	declaration.scope = scope;
 	declaration.node = node;
+	declaration.function_node = 0;
 	declaration.member = member;
 	declaration.types = 0;
 	declaration.annotation = 0;
+	declaration.returns_text = 0;
 	declaration.detail = 0;
 	declaration.signature = 0;
 	declaration.kind = kind;
@@ -418,12 +420,16 @@ static void seed_std_symbols(ltls_Index* index)
 			const ltls_StdEntry* member = &module->members[i];
 			lt_Token* member_token = synthetic_token(index, (lt_Span){ 0, 0 }, 0, 0, member->name);
 			if (!member_token) continue;
+			lt_AstNode* function = synthetic_node(index, LT_AST_NODE_FN);
+			if (!function) continue;
 
 			add_declaration(index, member_token, member_token->span, 0, node, 0, LTLS_DECL_FIELD, 0);
 			declaration = &index->declarations[index->declaration_count - 1];
-			declaration->types = ltls_type_add(index, 0, LTLS_TYPE_FUNCTION, 0);
+			declaration->function_node = function;
+			declaration->types = ltls_type_add(index, 0, LTLS_TYPE_FUNCTION, function);
 			declaration->signature = member->signature;
 			declaration->detail = (char*)member->detail;
+			declaration->returns_text = member->returns;
 			declaration->external = 1;
 		}
 	}
@@ -433,12 +439,16 @@ static void seed_std_symbols(ltls_Index* index)
 		const ltls_StdEntry* global = &ltls_std_globals[i];
 		lt_Token* token = synthetic_token(index, (lt_Span){ 0, 0 }, 0, 0, global->name);
 		if (!token) continue;
+		lt_AstNode* function = synthetic_node(index, LT_AST_NODE_FN);
+		if (!function) continue;
 
 		add_declaration(index, token, token->span, 0, 0, 0, LTLS_DECL_GLOBAL, 1);
 		ltls_Declaration* declaration = &index->declarations[index->declaration_count - 1];
-		declaration->types = ltls_type_add(index, 0, LTLS_TYPE_FUNCTION, 0);
+		declaration->function_node = function;
+		declaration->types = ltls_type_add(index, 0, LTLS_TYPE_FUNCTION, function);
 		declaration->signature = global->signature;
 		declaration->detail = (char*)global->detail;
+		declaration->returns_text = global->returns;
 		declaration->external = 1;
 	}
 }

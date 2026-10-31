@@ -507,6 +507,47 @@ async function main() {
   const printDefinition = await waitFor((message) => message.id === 41, "print definition");
   assert.equal(printDefinition.result, null);
 
+  const returnedUri = "file:///test/returned.little";
+  const returnedSource = [
+    "var s = string.format(\"%d\", 1)",
+    "var ok = io.writeFile(\"p\", \"x\")",
+    "var line = io.readLine()",
+    "var a = array.slice([1, 2], 0)",
+    "var n = number.from(\"1\")",
+    "var r = pcall(fn() {})",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: returnedUri, languageId: "little", version: 1, text: returnedSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === returnedUri, "returned diagnostics");
+
+  send({ jsonrpc: "2.0", id: 47, method: "textDocument/hover", params: { textDocument: { uri: returnedUri }, position: { line: 0, character: 4 } } });
+  const stringReturn = await waitFor((message) => message.id === 47, "string return hover");
+  assert.match(stringReturn.result.contents.value, /var s: string/);
+
+  send({ jsonrpc: "2.0", id: 48, method: "textDocument/hover", params: { textDocument: { uri: returnedUri }, position: { line: 1, character: 4 } } });
+  const boolReturn = await waitFor((message) => message.id === 48, "bool return hover");
+  assert.match(boolReturn.result.contents.value, /var ok: bool/);
+
+  send({ jsonrpc: "2.0", id: 49, method: "textDocument/hover", params: { textDocument: { uri: returnedUri }, position: { line: 2, character: 4 } } });
+  const unionReturn = await waitFor((message) => message.id === 49, "union return hover");
+  assert.match(unionReturn.result.contents.value, /var line: (?:string \| null|null \| string)/);
+
+  send({ jsonrpc: "2.0", id: 50, method: "textDocument/hover", params: { textDocument: { uri: returnedUri }, position: { line: 3, character: 4 } } });
+  const arrayReturn = await waitFor((message) => message.id === 50, "array return hover");
+  assert.match(arrayReturn.result.contents.value, /var a: array/);
+
+  send({ jsonrpc: "2.0", id: 51, method: "textDocument/hover", params: { textDocument: { uri: returnedUri }, position: { line: 4, character: 4 } } });
+  const nullableReturn = await waitFor((message) => message.id === 51, "nullable return hover");
+  assert.match(nullableReturn.result.contents.value, /var n: (?:number \| null|null \| number)/);
+
+  send({ jsonrpc: "2.0", id: 52, method: "textDocument/hover", params: { textDocument: { uri: returnedUri }, position: { line: 5, character: 4 } } });
+  const tableReturn = await waitFor((message) => message.id === 52, "table return hover");
+  assert.match(tableReturn.result.contents.value, /var r: table/);
+
   const chainUri = "file:///test/chain.little";
   const chainSource = [
     "class A {",

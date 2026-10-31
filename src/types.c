@@ -646,14 +646,27 @@ static void apply_declaration_annotations(ltls_Context* context)
 	for (uint32_t i = 0; i < context->index->declaration_count; i++)
 	{
 		ltls_Declaration* declaration = &context->index->declarations[i];
-		if (!declaration->annotation) continue;
 
-		ltls_TypeSet type = annotation_type(context, declaration->annotation);
-		if (!type) continue;
+		if (declaration->annotation)
+		{
+			ltls_TypeSet type = annotation_type(context, declaration->annotation);
+			if (type)
+			{
+				ltls_TypeSet before = declaration->types;
+				declaration->types = ltls_type_union(context->index, declaration->types, type);
+				if (!ltls_type_equals(before, declaration->types)) context->changed = 1;
+			}
+		}
 
-		ltls_TypeSet before = declaration->types;
-		declaration->types = ltls_type_union(context->index, declaration->types, type);
-		if (!ltls_type_equals(before, declaration->types)) context->changed = 1;
+		if (declaration->returns_text && declaration->function_node)
+		{
+			ltls_TypeSet returns = annotation_type(context, declaration->returns_text);
+			if (!returns) continue;
+
+			ltls_TypeSet before = ltls_index_returns(context->index, declaration->function_node);
+			ltls_TypeSet after = ltls_index_add_return(context->index, declaration->function_node, returns);
+			if (!ltls_type_equals(before, after)) context->changed = 1;
+		}
 	}
 }
 

@@ -43,9 +43,11 @@ typedef struct {
 	lt_Span span;
 	lt_Scope* scope;
 	lt_AstNode* node;
+	lt_AstNode* function_node; /* synthetic function whose returns std text decorates */
 	const lt_ClassMember* member;
 	ltls_TypeSet types;
 	char* annotation;   /* field type text from a doc shape */
+	const char* returns_text; /* return type text for standard library functions */
 	char* detail;       /* doc description for synthetic members */
 	const char* signature; /* display signature override (std symbols) */
 	uint8_t kind;

@@ -33,13 +33,13 @@ function escape(text) {
   return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, "\\n");
 }
 
-function add(module, name, signature, detail) {
+function add(module, name, signature, detail, returns) {
   if (module) {
     if (!modules.has(module)) modules.set(module, new Map());
-    if (!modules.get(module).has(name)) modules.get(module).set(name, { signature, detail });
+    if (!modules.get(module).has(name)) modules.get(module).set(name, { signature, detail, returns });
     return;
   }
-  if (!globals.has(name)) globals.set(name, { signature, detail });
+  if (!globals.has(name)) globals.set(name, { signature, detail, returns });
 }
 
 for (const file of sourceFiles(little)) {
@@ -52,6 +52,7 @@ for (const file of sourceFiles(little)) {
     const body = match[2];
     const description = [];
     const params = [];
+    const returns = [];
     let signatureArgs = 0;
 
     for (const raw of body.split(/\r?\n/)) {
@@ -61,6 +62,10 @@ for (const file of sourceFiles(little)) {
 
       if (trimmed.startsWith("@signature ")) {
         signatureArgs = trimmed.slice("@signature ".length).trim();
+        continue;
+      }
+      if (trimmed.startsWith("@return ")) {
+        returns.push(trimmed.slice("@return ".length).trim());
         continue;
       }
       if (trimmed.startsWith("@param ")) {
@@ -83,8 +88,9 @@ for (const file of sourceFiles(little)) {
 
     const dot = qualified.indexOf(".");
     const signature = `fn ${qualified}${signatureArgs}`;
-    if (dot > 0) add(qualified.slice(0, dot), qualified.slice(dot + 1), signature, detail);
-    else add(0, qualified, signature, detail);
+    const returnType = returns.join(" | ");
+    if (dot > 0) add(qualified.slice(0, dot), qualified.slice(dot + 1), signature, detail, returnType);
+    else add(0, qualified, signature, detail, returnType);
   }
 }
 
@@ -96,6 +102,7 @@ out.push("typedef struct {");
 out.push("\tconst char* name;");
 out.push("\tconst char* signature;");
 out.push("\tconst char* detail;");
+out.push("\tconst char* returns;");
 out.push("} ltls_StdEntry;");
 out.push("");
 out.push("typedef struct {");
@@ -111,7 +118,7 @@ for (const module of moduleNames) {
   out.push(`static const ltls_StdEntry ltls_std_members_${module}[] = {`);
   for (const member of members) {
     const entry = modules.get(module).get(member);
-    out.push(`\t{ "${escape(member)}", "${escape(entry.signature)}", "${escape(entry.detail)}" },`);
+    out.push(`\t{ "${escape(member)}", "${escape(entry.signature)}", "${escape(entry.detail)}", "${escape(entry.returns)}" },`);
   }
   out.push("};");
   out.push("");
@@ -128,7 +135,7 @@ const globalNames = [...globals.keys()].sort();
 out.push("static const ltls_StdEntry ltls_std_globals[] = {");
 for (const name of globalNames) {
   const entry = globals.get(name);
-  out.push(`\t{ "${escape(name)}", "${escape(entry.signature)}", "${escape(entry.detail)}" },`);
+  out.push(`\t{ "${escape(name)}", "${escape(entry.signature)}", "${escape(entry.detail)}", "${escape(entry.returns)}" },`);
 }
 out.push("};");
 out.push(`#define LTLS_STD_GLOBAL_COUNT ${globalNames.length}`);
