@@ -414,6 +414,154 @@ static lt_AstNode* synthetic_node(ltls_Index* index, lt_AstNodeType type)
 	return node;
 }
 
+static char* copy_range(const char* text, size_t length)
+{
+	char* copy = malloc(length + 1);
+	if (!copy) return 0;
+	memcpy(copy, text, length);
+	copy[length] = 0;
+	return copy;
+}
+
+static void trim_bounds(const char* text, size_t* start, size_t* end)
+{
+	while (*start < *end && (text[*start] == ' ' || text[*start] == '\t')) (*start)++;
+	while (*end > *start && (text[*end - 1] == ' ' || text[*end - 1] == '\t')) (*end)--;
+}
+
+static lt_AstNode* shape_lookup(const ltls_Index* index, const char* text)
+{
+	if (!text) return 0;
+
+	size_t start = 0, end = strlen(text);
+	trim_bounds(text, &start, &end);
+	size_t length = end - start;
+
+	for (uint32_t i = 0; i < index->shape_count; i++)
+	{
+		const char* candidate = index->shapes[i].text;
+		if (candidate && strlen(candidate) == length && strncmp(candidate, text + start, length) == 0)
+			return index->shapes[i].node;
+	}
+	return 0;
+}
+
+/* `{ name: type, ... }` becomes an anonymous table: members resolve through
+   the normal table-field lookup, including from `with`/`@`. */
+static void register_shapes(ltls_Index* index, const char* text);
+
+static lt_AstNode* create_shape(ltls_Index* index, const char* text)
+{
+	if (!text) return 0;
+
+	size_t start = 0, end = strlen(text);
+	trim_bounds(text, &start, &end);
+	if (start >= end || text[start] != '{') return 0;
+
+	lt_AstNode* existing = shape_lookup(index, text);
+	if (existing) return existing;
+
+	lt_AstNode* table = synthetic_node(index, LT_AST_NODE_TABLE);
+	if (!table) return 0;
+
+	ltls_Shape* shapes = realloc(index->shapes, sizeof(ltls_Shape) * (index->shape_count + 1));
+	if (!shapes) return 0;
+
+	index->shapes = shapes;
+	index->shapes[index->shape_count].text = copy_range(text + start, end - start);
+	index->shapes[index->shape_count].node = table;
+	index->shape_count++;
+
+	size_t cursor = start + 1;
+	size_t limit = end > start ? end - 1 : end;
+	size_t field_start = cursor;
+	int depth = 0;
+
+	for (size_t i = cursor; i <= limit; i++)
+	{
+		char c = i < limit ? text[i] : ',';
+		if (c == '{') { depth++; continue; }
+		if (c == '}')
+		{
+			if (depth) depth--;
+			continue;
+		}
+		if (c != ',' || depth) continue;
+
+		size_t fs = field_start, fe = i;
+		trim_bounds(text, &fs, &fe);
+
+		size_t colon = fs;
+		while (colon < fe && text[colon] != ':') colon++;
+
+		if (colon < fe)
+		{
+			size_t ns = fs, ne = colon, ts = colon + 1, te = fe;
+			trim_bounds(text, &ns, &ne);
+			trim_bounds(text, &ts, &te);
+
+			if (ns < ne && ts < te)
+			{
+				char* name = copy_range(text + ns, ne - ns);
+				char* type = copy_range(text + ts, te - ts);
+				if (type && type[0] == '{') create_shape(index, type);
+
+				lt_Token* token = name ? synthetic_token(index, (lt_Span){ 0, 0 }, 0, 0, name) : 0;
+				if (token)
+				{
+					add_declaration(index, token, token->span, 0, table, 0, LTLS_DECL_FIELD, 0);
+					ltls_Declaration* declaration = &index->declarations[index->declaration_count - 1];
+					declaration->annotation = type;
+					type = 0;
+				}
+
+				free(type);
+				free(name);
+			}
+		}
+
+		field_start = i + 1;
+	}
+
+	return table;
+}
+
+/* Splits a union of structural types and prepares a shape for each segment. */
+static void register_shapes(ltls_Index* index, const char* text)
+{
+	if (!text) return;
+
+	size_t start = 0, end = strlen(text);
+	trim_bounds(text, &start, &end);
+	int depth = 0;
+
+	for (size_t i = start; i <= end; i++)
+	{
+		char c = i < end ? text[i] : '|';
+		if (c == '{') depth++;
+		else if (c == '}' && depth) depth--;
+		if (depth || c != '|') continue;
+
+		size_t s = start, e = i;
+		trim_bounds(text, &s, &e);
+		if (s < e)
+		{
+			char* segment = copy_range(text + s, e - s);
+			if (segment)
+			{
+				create_shape(index, segment);
+				free(segment);
+			}
+		}
+		start = i + 1;
+	}
+}
+
+lt_AstNode* ltls_index_shape(const ltls_Index* index, const char* text)
+{
+	return shape_lookup(index, text);
+}
+
 static lt_AstNode* synthetic_class(ltls_Index* index)
 {
 	return synthetic_node(index, LT_AST_NODE_CLASS);
@@ -501,6 +649,16 @@ static void build_doc_shapes(ltls_Index* index)
 			last_line = candidate->line;
 		}
 		skip_until_line = last_line;
+
+		for (uint32_t p = 0; p < doc.param_count; p++)
+			if (doc.params[p].type) register_shapes(index, doc.params[p].type);
+		for (uint32_t r = 0; r < doc.return_count; r++)
+			if (doc.returns[r].type) register_shapes(index, doc.returns[r].type);
+		for (uint32_t f = 0; f < doc.field_count; f++)
+			if (doc.fields[f].type) register_shapes(index, doc.fields[f].type);
+		for (uint32_t t = 0; t < doc.tag_count; t++)
+			if (doc.tags[t] && strncmp(doc.tags[t], "@type ", 6) == 0)
+				register_shapes(index, doc.tags[t] + 6);
 
 		if (!doc.class_name)
 		{
@@ -624,6 +782,8 @@ void ltls_index_free(ltls_Index* index)
 	}
 	for (uint32_t i = 0; i < index->token_text_count; i++) free(index->token_texts[i].text);
 	free(index->token_texts);
+	for (uint32_t i = 0; i < index->shape_count; i++) free(index->shapes[i].text);
+	free(index->shapes);
 	for (uint32_t i = 0; i < index->token_allocation_count; i++) free(index->token_allocations[i]);
 	free(index->token_allocations);
 	for (uint32_t i = 0; i < index->node_allocation_count; i++) free(index->node_allocations[i]);

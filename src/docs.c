@@ -97,6 +97,50 @@ static char* bracket_value(const char** cursor, const char* end)
 	return trim_copy(start, (size_t)(close - start));
 }
 
+/* A type expression: a word or balanced `{ ... }` shape, optionally joined by
+   `|` with spaces (`{ ok: boolean } | { error: string }`). */
+static char* next_type(const char** cursor, const char* end)
+{
+	const char* position = *cursor;
+	while (position < end && is_space(*position)) position++;
+	if (position >= end) return 0;
+
+	const char* start = position;
+	for (;;)
+	{
+		if (*position == '{')
+		{
+			int depth = 0;
+			while (position < end)
+			{
+				if (*position == '{') depth++;
+				else if (*position == '}')
+				{
+					depth--;
+					position++;
+					if (depth == 0) break;
+					continue;
+				}
+				position++;
+			}
+		}
+		else
+		{
+			while (position < end && !is_space(*position) && *position != '|') position++;
+		}
+
+		const char* probe = position;
+		while (probe < end && is_space(*probe)) probe++;
+		if (probe >= end || *probe != '|') break;
+
+		position = probe + 1;
+		while (position < end && is_space(*position)) position++;
+	}
+
+	*cursor = position;
+	return duplicate(start, (size_t)(position - start));
+}
+
 static void push_param(ltls_Doc* doc, ltls_DocParam param)
 {
 	ltls_DocParam* items = realloc(doc->params, sizeof(ltls_DocParam) * (doc->param_count + 1));
@@ -179,7 +223,7 @@ static void parse_annotation(ltls_Doc* doc, const char* text, size_t length, con
 	if (tag_length == 5 && memcmp(tag_start, "param", 5) == 0)
 	{
 		const char* cursor = tag_end;
-		char* type = next_word(&cursor, end);
+		char* type = next_type(&cursor, end);
 		char* name = next_word(&cursor, end);
 		if (type && name)
 		{
@@ -199,7 +243,7 @@ static void parse_annotation(ltls_Doc* doc, const char* text, size_t length, con
 	if (tag_length == 6 && memcmp(tag_start, "return", 6) == 0)
 	{
 		const char* cursor = tag_end;
-		char* type = next_word(&cursor, end);
+		char* type = next_type(&cursor, end);
 		if (type)
 		{
 			char* name = bracket_value(&cursor, end);
@@ -241,7 +285,7 @@ static void parse_annotation(ltls_Doc* doc, const char* text, size_t length, con
 	if (tag_length == 5 && memcmp(tag_start, "field", 5) == 0)
 	{
 		const char* cursor = tag_end;
-		char* type = next_word(&cursor, end);
+		char* type = next_type(&cursor, end);
 		lt_Span name_span = { 0, 0 };
 		char* name = next_word_at(&cursor, end, source, &name_span);
 

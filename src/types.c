@@ -76,6 +76,12 @@ static ltls_TypeSet annotation_segment(ltls_Context* context, char* text)
 
 	if (strcmp(text, "?") == 0 || strcmp(text, "any") == 0 || strcmp(text, "unknown") == 0) return 0;
 
+	if (text[0] == '{')
+	{
+		lt_AstNode* shape = ltls_index_shape(context->index, text);
+		return shape ? ltls_type_add(context->index, 0, LTLS_TYPE_TABLE, shape) : 0;
+	}
+
 	uint8_t kind = LTLS_TYPE_UNKNOWN;
 	lt_AstNode* node = 0;
 
@@ -102,15 +108,20 @@ static ltls_TypeSet annotation_type(ltls_Context* context, const char* type)
 {
 	if (!type) return 0;
 
-	char buffer[160];
+	char buffer[512];
 	size_t length = strlen(type);
 	if (length == 0 || length >= sizeof(buffer)) return 0;
 	memcpy(buffer, type, length + 1);
 
 	ltls_TypeSet result = 0;
 	char* segment = buffer;
+	int depth = 0;
 	for (char* position = buffer; ; position++)
 	{
+		if (*position == '{') depth++;
+		else if (*position == '}' && depth) depth--;
+
+		if (depth) continue;
 		if (*position != '|' && *position != 0) continue;
 
 		char saved = *position;

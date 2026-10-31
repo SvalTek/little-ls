@@ -855,6 +855,67 @@ async function main() {
   const externalRename = await waitFor((message) => message.id === 80, "external rename");
   assert.equal(externalRename.result, null);
 
+  const structUri = "file:///test/structural.little";
+  const structText = [
+    ";; @param { foo: boolean, bar: string } opts",
+    "fn f(opts) {",
+    "  io.print(opts.foo)",
+    "  opts.",
+    "  with opts {",
+    "    io.print(@bar)",
+    "  }",
+    "}",
+    ";; @return { ok: boolean, value: number }",
+    "fn make() {",
+    "}",
+    "var r = make()",
+    "io.print(r.ok)",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: structUri, languageId: "little", version: 1, text: structText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === structUri, "structural diagnostics");
+
+  send({ jsonrpc: "2.0", id: 81, method: "textDocument/completion", params: { textDocument: { uri: structUri }, position: { line: 3, character: 7 } } });
+  const structCompletion = await waitFor((message) => message.id === 81, "structural completion");
+  assert.deepEqual(structCompletion.result.items.map((item) => item.label).sort(), ["bar", "foo"]);
+
+  send({ jsonrpc: "2.0", id: 82, method: "textDocument/hover", params: { textDocument: { uri: structUri }, position: { line: 2, character: 17 } } });
+  const structField = await waitFor((message) => message.id === 82, "structural field hover");
+  assert.match(structField.result.contents.value, /field foo: bool/);
+
+  send({ jsonrpc: "2.0", id: 83, method: "textDocument/hover", params: { textDocument: { uri: structUri }, position: { line: 5, character: 15 } } });
+  const structReceiverField = await waitFor((message) => message.id === 83, "structural receiver hover");
+  assert.match(structReceiverField.result.contents.value, /field bar: string/);
+
+  send({ jsonrpc: "2.0", id: 84, method: "textDocument/definition", params: { textDocument: { uri: structUri }, position: { line: 2, character: 17 } } });
+  const structDefinition = await waitFor((message) => message.id === 84, "structural definition");
+  assert.equal(structDefinition.result, null);
+
+  send({ jsonrpc: "2.0", id: 85, method: "textDocument/hover", params: { textDocument: { uri: structUri }, position: { line: 11, character: 4 } } });
+  const structReturn = await waitFor((message) => message.id === 85, "structural return hover");
+  assert.match(structReturn.result.contents.value, /var r: table/);
+
+  send({ jsonrpc: "2.0", id: 86, method: "textDocument/hover", params: { textDocument: { uri: structUri }, position: { line: 12, character: 12 } } });
+  const structReturnField = await waitFor((message) => message.id === 86, "structural return field hover");
+  assert.match(structReturnField.result.contents.value, /field ok: bool/);
+
+  const unionShapeUri = "file:///test/unionshape.little";
+  const unionShapeText = ";; @param { ok: boolean } | { error: string } result\nfn g(result) {\n  io.print(result.ok)\n}\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: unionShapeUri, languageId: "little", version: 1, text: unionShapeText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === unionShapeUri, "union shape diagnostics");
+
+  send({ jsonrpc: "2.0", id: 87, method: "textDocument/hover", params: { textDocument: { uri: unionShapeUri }, position: { line: 2, character: 19 } } });
+  const unionShapeField = await waitFor((message) => message.id === 87, "union shape field hover");
+  assert.match(unionShapeField.result.contents.value, /field ok: bool/);
+
   send({ jsonrpc: "2.0", id: 69, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 14 } } });
   const tableThisTarget = await waitFor((message) => message.id === 69, "table this target hover");
   assert.match(tableThisTarget.result.contents.value, /this: table/);

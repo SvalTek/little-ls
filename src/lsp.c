@@ -721,7 +721,7 @@ static yyjson_mut_val* build_definition(yyjson_mut_doc* document, void* context)
 	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, 0);
 
 	yyjson_mut_val* result = 0;
-	if (declaration && !declaration->external)
+	if (declaration && !declaration->external && !(declaration->name->flags & LT_TOKEN_SYNTHETIC))
 	{
 		result = yyjson_mut_obj(document);
 		yyjson_mut_obj_add_strcpy(document, result, "uri", position->document->uri);

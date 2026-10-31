@@ -77,6 +77,11 @@ typedef struct {
 } ltls_TokenText;
 
 typedef struct {
+	char* text;
+	lt_AstNode* node;
+} ltls_Shape;
+
+typedef struct {
 	const lt_Tokenizer* tokens;
 	const char* source;
 	ltls_Declaration* declarations;
@@ -93,6 +98,10 @@ typedef struct {
 	/* text for synthetic tokens created from doc shapes */
 	ltls_TokenText* token_texts;
 	uint32_t token_text_count;
+
+	/* structural type text -> anonymous table shape */
+	ltls_Shape* shapes;
+	uint32_t shape_count;
 	lt_Token** token_allocations;
 	uint32_t token_allocation_count;
 	lt_AstNode** node_allocations;
@@ -116,6 +125,9 @@ const ltls_Declaration* ltls_index_lookup(const ltls_Index* index, lt_Scope* sco
 
 /* Token name, including synthetic doc-shape tokens. */
 const char* ltls_index_token_text(const ltls_Index* index, const lt_Token* token);
+
+/* Anonymous table shape prepared for a structural type like `{ a: number }`. */
+lt_AstNode* ltls_index_shape(const ltls_Index* index, const char* text);
 
 /* Member/field lookup by class node or table literal node. */
 const ltls_Declaration* ltls_index_member(const ltls_Index* index, lt_AstNode* class_node, lt_Token* token);
