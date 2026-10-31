@@ -1,6 +1,6 @@
-// Generates src/std_symbols.h from little/doc/std/*.md.
-// Usage: node scripts/generate-std.mjs [--little ../little] [-o src/std_symbols.h]
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+// Generates src/std_symbols.h from `[LittleBinding]` doc comments in the C
+// sources. Usage: node scripts/generate-std.mjs [--little ../little] [-o src/std_symbols.h]
+import { readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,119 +14,82 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === "-o") output = path.resolve(args[++i]);
 }
 
-const docsDir = path.join(little, "doc", "std");
+function sourceFiles(dir) {
+  const out = [];
+  for (const name of readdirSync(dir)) {
+    if (name === "vendor" || name === "build" || name === ".git" || name === ".task") continue;
+    const full = path.join(dir, name);
+    const stat = statSync(full);
+    if (stat.isDirectory()) out.push(...sourceFiles(full));
+    else if (name.endsWith(".c")) out.push(full);
+  }
+  return out;
+}
+
 const modules = new Map();
 const globals = new Map();
 
-const GLOBAL_FILES = new Set(["core", "async"]);
-const C_API_NAMES = new Set(["loadLibrary", "lt_runloop", "ltopen", "sizeof"]);
-
 function escape(text) {
-  return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, " ");
+  return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, "\\n");
 }
 
-function add(map, name, signature, detail) {
-  if (!map.has(name)) map.set(name, { signature, detail });
-}
-
-function addModule(module) {
-  if (!modules.has(module)) modules.set(module, new Map());
-  return modules.get(module);
-}
-
-function callable(text) {
-  const paren = text.indexOf("(");
-  if (paren <= 0) return 0;
-  if (text.includes("*")) return 0;
-
-  const callee = text.slice(0, paren).trim();
-  if (!/^[A-Za-z_][\w.]*$/.test(callee)) return 0;
-  if (C_API_NAMES.has(callee)) return 0;
-  if (/^ltstd_|^lt_|^lt[A-Z]|^lt$/.test(callee)) return 0;
-
-  /* `bit.shl(1, 31)` is an example, not a signature. */
-  const args = text.slice(paren + 1);
-  if (/\d/.test(args) && !/[A-Za-z_]/.test(args)) return 0;
-
-  return callee;
-}
-
-function addSignature(text, detail, fileModule, line) {
-  const callee = callable(text);
-  if (!callee || !detail) return;
-
-  if (callee.includes(".")) {
-    const [module, member] = callee.split(".");
-    if (!module || !member) return;
-    add(addModule(module), member, `fn ${text}`, detail);
+function add(module, name, signature, detail) {
+  if (module) {
+    if (!modules.has(module)) modules.set(module, new Map());
+    if (!modules.get(module).has(name)) modules.get(module).set(name, { signature, detail });
     return;
   }
-
-  if (!GLOBAL_FILES.has(fileModule)) {
-    // Unqualified names in a module doc are only trusted from tables.
-    if (!line.trimStart().startsWith("|")) return;
-    add(addModule(fileModule), callee, `fn ${text}`, detail);
-    return;
-  }
-
-  // Globals must be the first inline code on their line, so prose that mentions
-  // methods (`next(...)`) does not become a global.
-  if (line.indexOf("`") !== line.indexOf("`" + text + "`")) return;
-
-  const chained = /^and `([^`]+)`\s*(.*)$/.exec(detail);
-  if (chained)
-  {
-    const extra = callable(chained[1]);
-    if (extra) add(globals, extra, `fn ${chained[1]}`, chained[2] || detail);
-    detail = chained[2] || detail;
-  }
-
-  add(globals, callee, `fn ${text}`, detail);
+  if (!globals.has(name)) globals.set(name, { signature, detail });
 }
 
-const docs = readdirSync(docsDir).filter((f) => f.endsWith(".md")).sort();
+for (const file of sourceFiles(little)) {
+  const text = readFileSync(file, "utf8");
+  const blocks = /\/\*\* \[LittleBinding\] ([^\s]+)\r?\n([\s\S]*?)\*\//g;
+  let match;
 
-for (const pass of ["tables", "prose"]) {
-  for (const file of docs) {
-    const module = path.basename(file, ".md");
-    const lines = readFileSync(path.join(docsDir, file), "utf8").split(/\r?\n/);
-    let fenced = false;
+  while ((match = blocks.exec(text)) !== null) {
+    const qualified = match[1];
+    const body = match[2];
+    const description = [];
+    const params = [];
+    let signatureArgs = 0;
 
-    for (const line of lines) {
-      if (line.trimStart().startsWith("```")) {
-        fenced = !fenced;
+    for (const raw of body.split(/\r?\n/)) {
+      const line = raw.replace(/^\s*\*\s?/, "").trimEnd();
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      if (trimmed.startsWith("@signature ")) {
+        signatureArgs = trimmed.slice("@signature ".length).trim();
         continue;
       }
-      if (fenced) continue;
-
-      const isTable = line.trimStart().startsWith("|");
-      if (pass === "tables" && !isTable) continue;
-      if (pass === "prose" && isTable) continue;
-
-      if (isTable) {
-        const cells = line.split("|").map((cell) => cell.trim());
-        const body = cells.slice(1, -1);
-        if (body.length < 2) continue;
-        const detail = body[body.length - 1];
-        const pattern = /`([^`]+)`/g;
-        let match;
-        while ((match = pattern.exec(body[0])) !== null)
-          addSignature(match[1], detail, module, line);
+      if (trimmed.startsWith("@param ")) {
+        const rest = trimmed.slice("@param ".length).trim();
+        const space = rest.indexOf(" ");
+        params.push(space < 0 ? { name: rest, text: "" } : { name: rest.slice(0, space), text: rest.slice(space + 1).trim() });
         continue;
       }
-
-      const pattern = /`([^`]+)`/g;
-      let match;
-      while ((match = pattern.exec(line)) !== null) {
-        const detail = line.slice(match.index + match[0].length).trim();
-        addSignature(match[1], detail, module, line);
-      }
+      description.push(trimmed);
     }
+
+    if (!signatureArgs && params.length) signatureArgs = `(${params.map((param) => param.name).join(", ")})`;
+    if (!signatureArgs) signatureArgs = "()";
+
+    let detail = description.join(" ");
+    if (params.length) {
+      const bullets = params.filter((param) => param.text).map((param) => `- ${param.name}: ${param.text}`);
+      if (bullets.length) detail = detail ? `${detail}\n${bullets.join("\n")}` : bullets.join("\n");
+    }
+
+    const dot = qualified.indexOf(".");
+    const signature = `fn ${qualified}${signatureArgs}`;
+    if (dot > 0) add(qualified.slice(0, dot), qualified.slice(dot + 1), signature, detail);
+    else add(0, qualified, signature, detail);
   }
 }
 
 const out = [];
-out.push("/* Generated by scripts/generate-std.mjs from little/doc/std/*.md. Do not edit. */");
+out.push("/* Generated by scripts/generate-std.mjs from [LittleBinding] comments in little sources. Do not edit. */");
 out.push("#pragma once");
 out.push("");
 out.push("typedef struct {");
