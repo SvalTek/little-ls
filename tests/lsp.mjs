@@ -669,7 +669,9 @@ async function main() {
 
   send({ jsonrpc: "2.0", id: 62, method: "textDocument/completion", params: { textDocument: { uri: tableKeywordUri }, position: { line: 2, character: 7 } } });
   const tableKeyword = await waitFor((message) => message.id === 62, "table this keyword");
-  assert.ok(tableKeyword.result.items.some((item) => item.label === "this"), "table this keyword missing");
+  const tableThis = tableKeyword.result.items.find((item) => item.label === "this");
+  assert.ok(tableThis, "table this keyword missing");
+  assert.equal(tableThis.detail, "table");
 
   const tableHoverUri = "file:///test/tablehover.little";
   const tableHoverText = "var obj = {\n  prefix: \"obj\"\n  add: fn(this, t) {\n    io.print(this.prefix)\n    io.print(@prefix)\n  }\n}\n";
@@ -785,6 +787,30 @@ async function main() {
   send({ jsonrpc: "2.0", id: 68, method: "textDocument/hover", params: { textDocument: { uri: recoveryUri }, position: { line: 2, character: 7 } } });
   const recovered = await waitFor((message) => message.id === 68, "recovered statement hover");
   assert.match(recovered.result.contents.value, /var ok: number/);
+
+  send({ jsonrpc: "2.0", id: 69, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 14 } } });
+  const tableThisTarget = await waitFor((message) => message.id === 69, "table this target hover");
+  assert.match(tableThisTarget.result.contents.value, /this: table/);
+
+  send({ jsonrpc: "2.0", id: 70, method: "textDocument/hover", params: { textDocument: { uri: combinedUri }, position: { line: 8, character: 7 } } });
+  const classThisTarget = await waitFor((message) => message.id === 70, "class this target hover");
+  assert.match(classThisTarget.result.contents.value, /this: Provider/);
+
+  const classKeywordUri = "file:///test/classkeyword.little";
+  const classKeywordText = "class Provider {\n  test() {\n    thi\n  }\n}\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: classKeywordUri, languageId: "little", version: 1, text: classKeywordText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === classKeywordUri, "class keyword diagnostics");
+
+  send({ jsonrpc: "2.0", id: 71, method: "textDocument/completion", params: { textDocument: { uri: classKeywordUri }, position: { line: 2, character: 7 } } });
+  const classKeyword = await waitFor((message) => message.id === 71, "class this keyword");
+  const classThis = classKeyword.result.items.find((item) => item.label === "this");
+  assert.ok(classThis, "class this keyword missing");
+  assert.equal(classThis.detail, "Provider");
+
   const chainUri = "file:///test/chain.little";
   const chainSource = [
     "class A {",

@@ -616,6 +616,9 @@ static void markdown_append_docs(ltls_Markdown* markdown, const ltls_Doc* docs, 
 	}
 }
 
+static lt_Token* token_at(const lt_Analysis* analysis, uint32_t offset);
+static const char* self_detail(const ltls_Index* index, lt_AstNode* self, char* buffer, size_t size);
+
 static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 {
 	ltls_PositionContext* position = context;
@@ -626,6 +629,37 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 	if (!state.vm) return 0;
 
 	uint32_t offset = position_to_offset(&state.lines, position->document->text, position->line, position->character);
+
+	lt_Token* hovered = token_at(&state.analysis, offset);
+	const char* hovered_name = hovered ? token_name(&state.analysis, hovered) : 0;
+	if (hovered_name && strcmp(hovered_name, "this") == 0)
+	{
+		lt_AstNode* self = ltls_index_self_at(&state.index, offset);
+		if (self)
+		{
+			char detail[160];
+			char line[200];
+			snprintf(line, sizeof(line), "this: %s", self_detail(&state.index, self, detail, sizeof(detail)));
+
+			ltls_Markdown markdown = { 0 };
+			markdown_append(&markdown, "```little\n");
+			markdown_append(&markdown, line);
+			markdown_append(&markdown, "\n```\n");
+
+			yyjson_mut_val* result = yyjson_mut_obj(document);
+			yyjson_mut_val* contents = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_strcpy(document, contents, "kind", "markdown");
+			yyjson_mut_obj_add_strcpy(document, contents, "value", markdown.text);
+			yyjson_mut_obj_add_val(document, result, "contents", contents);
+			yyjson_mut_obj_add_val(document, result, "range",
+				range_object(document, &state.lines, position->document->text, hovered->span));
+
+			free(markdown.text);
+			analysis_state_close(&state);
+			return result;
+		}
+	}
+
 	const ltls_Reference* reference = 0;
 	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, &reference);
 
@@ -804,6 +838,38 @@ static lt_Token* token_ending_at(const lt_Analysis* analysis, uint32_t offset)
 		if (!best || token->span.start > best->span.start) best = token;
 	}
 	return best;
+}
+
+static lt_Token* token_at(const lt_Analysis* analysis, uint32_t offset)
+{
+	lt_Token* best = 0;
+	for (uint32_t i = 0; i < analysis->tokens.token_buffer.length; i++)
+	{
+		lt_Token* token = LTLS_BUFFER_AT(lt_Token, analysis->tokens.token_buffer, i);
+		if (token->flags & LT_TOKEN_SYNTHETIC) continue;
+		if (offset < token->span.start || offset >= token->span.end) continue;
+		if (!best || token->span.start > best->span.start) best = token;
+	}
+	return best;
+}
+
+/* Names the shape `this` actually refers to when it is known: the class, or
+   the table literal that owns a receiver function. */
+static const char* self_detail(const ltls_Index* index, lt_AstNode* self, char* buffer, size_t size)
+{
+	if (self && self->type == LT_AST_NODE_CLASS)
+	{
+		const char* name = ltls_index_token_text(index, self->class_decl.identifier);
+		snprintf(buffer, size, "%s", name && name[0] ? name : "class");
+		return buffer;
+	}
+	if (self && self->type == LT_AST_NODE_TABLE)
+	{
+		snprintf(buffer, size, "table");
+		return buffer;
+	}
+	snprintf(buffer, size, "the enclosing receiver");
+	return buffer;
 }
 
 static uint8_t scope_contains_offset(lt_Scope* scope, uint32_t offset)
@@ -994,6 +1060,7 @@ static yyjson_mut_val* build_completion(yyjson_mut_doc* document, void* context)
 	{
 		const char* claimed[512];
 		uint32_t claimed_count = 0;
+		lt_AstNode* self_node = ltls_index_self_at(&state.index, offset);
 
 		for (uint32_t i = 0; i < state.index.declaration_count; i++)
 		{
@@ -1020,6 +1087,18 @@ static yyjson_mut_val* build_completion(yyjson_mut_doc* document, void* context)
 				if (strcmp(claimed[j], name) == 0) { duplicate = 1; break; }
 			if (duplicate) continue;
 			if (claimed_count < 512) claimed[claimed_count++] = name;
+
+			if (self_node && strcmp(name, "this") == 0)
+			{
+				char detail[160];
+				yyjson_mut_val* item = yyjson_mut_obj(document);
+				yyjson_mut_obj_add_strcpy(document, item, "label", name);
+				yyjson_mut_obj_add_int(document, item, "kind", 6);
+				yyjson_mut_obj_add_strcpy(document, item, "detail",
+					self_detail(&state.index, self_node, detail, sizeof(detail)));
+				yyjson_mut_arr_add_val(items, item);
+				continue;
+			}
 
 			yyjson_mut_val* item = completion_item(document, &state.index, declaration);
 			if (item) yyjson_mut_arr_add_val(items, item);
@@ -1048,7 +1127,7 @@ static yyjson_mut_val* build_completion(yyjson_mut_doc* document, void* context)
 			yyjson_mut_arr_add_val(items, item);
 		}
 
-		if (ltls_index_self_at(&state.index, offset) && strncmp("this", prefix, prefix_length) == 0)
+		if (self_node && strncmp("this", prefix, prefix_length) == 0)
 		{
 			uint8_t duplicate = 0;
 			for (uint32_t j = 0; j < claimed_count; j++)
@@ -1058,10 +1137,12 @@ static yyjson_mut_val* build_completion(yyjson_mut_doc* document, void* context)
 			{
 				if (claimed_count < 512) claimed[claimed_count++] = "this";
 
+				char detail[160];
 				yyjson_mut_val* item = yyjson_mut_obj(document);
 				yyjson_mut_obj_add_strcpy(document, item, "label", "this");
 				yyjson_mut_obj_add_int(document, item, "kind", 14);
-				yyjson_mut_obj_add_strcpy(document, item, "detail", "the enclosing receiver");
+				yyjson_mut_obj_add_strcpy(document, item, "detail",
+					self_detail(&state.index, self_node, detail, sizeof(detail)));
 				yyjson_mut_arr_add_val(items, item);
 			}
 		}
