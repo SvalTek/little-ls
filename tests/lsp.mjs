@@ -630,6 +630,118 @@ async function main() {
   const withCompletion = await waitFor((message) => message.id === 59, "with completion");
   assert.ok(withCompletion.result.items.some((item) => item.label === "baseUrl"), "@ completion missing baseUrl");
 
+  const tableThisUri = "file:///test/tablethis.little";
+  const tableThisText = "var obj = {\n  prefix: \"obj\"\n  add: fn(this, t) {\n    this.\n  }\n}\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: tableThisUri, languageId: "little", version: 1, text: tableThisText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === tableThisUri, "table this diagnostics");
+
+  send({ jsonrpc: "2.0", id: 60, method: "textDocument/completion", params: { textDocument: { uri: tableThisUri }, position: { line: 3, character: 9 } } });
+  const tableThisMembers = await waitFor((message) => message.id === 60, "table this completion");
+  const tableThisLabels = tableThisMembers.result.items.map((item) => item.label);
+  assert.ok(tableThisLabels.includes("prefix"), "table this missing prefix");
+  assert.ok(tableThisLabels.includes("add"), "table this missing add");
+
+  const tableAtUri = "file:///test/tableat.little";
+  const tableAtText = "var obj = {\n  prefix: \"obj\"\n  add: fn(this, t) {\n    @pr\n  }\n}\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: tableAtUri, languageId: "little", version: 1, text: tableAtText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === tableAtUri, "table at diagnostics");
+
+  send({ jsonrpc: "2.0", id: 61, method: "textDocument/completion", params: { textDocument: { uri: tableAtUri }, position: { line: 3, character: 7 } } });
+  const tableAtMembers = await waitFor((message) => message.id === 61, "table at completion");
+  assert.ok(tableAtMembers.result.items.some((item) => item.label === "prefix"), "table @ missing prefix");
+
+  const tableKeywordUri = "file:///test/tablekw.little";
+  const tableKeywordText = "var obj = {\n  add: fn(this, t) {\n    thi\n  }\n}\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: tableKeywordUri, languageId: "little", version: 1, text: tableKeywordText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === tableKeywordUri, "table keyword diagnostics");
+
+  send({ jsonrpc: "2.0", id: 62, method: "textDocument/completion", params: { textDocument: { uri: tableKeywordUri }, position: { line: 2, character: 7 } } });
+  const tableKeyword = await waitFor((message) => message.id === 62, "table this keyword");
+  assert.ok(tableKeyword.result.items.some((item) => item.label === "this"), "table this keyword missing");
+
+  const tableHoverUri = "file:///test/tablehover.little";
+  const tableHoverText = "var obj = {\n  prefix: \"obj\"\n  add: fn(this, t) {\n    io.print(this.prefix)\n    io.print(@prefix)\n  }\n}\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: tableHoverUri, languageId: "little", version: 1, text: tableHoverText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === tableHoverUri, "table hover diagnostics");
+
+  send({ jsonrpc: "2.0", id: 63, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 19 } } });
+  const tableThisHover = await waitFor((message) => message.id === 63, "table this hover");
+  assert.match(tableThisHover.result.contents.value, /field prefix/);
+
+  send({ jsonrpc: "2.0", id: 64, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 4, character: 15 } } });
+  const tableAtHover = await waitFor((message) => message.id === 64, "table at hover");
+  assert.match(tableAtHover.result.contents.value, /field prefix/);
+
+  const withThisUri = "file:///test/withthis.little";
+  const withThisText = [
+    ";; @class Opts",
+    ";; @field string remote",
+    ";;",
+    "class Provider {",
+    "  baseUrl",
+    "  ;; @param Opts opts",
+    "  constructor(opts) {",
+    "    with opts {",
+    "      this.",
+    "    }",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: withThisUri, languageId: "little", version: 1, text: withThisText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === withThisUri, "with this diagnostics");
+
+  send({ jsonrpc: "2.0", id: 65, method: "textDocument/completion", params: { textDocument: { uri: withThisUri }, position: { line: 8, character: 11 } } });
+  const withThisMembers = await waitFor((message) => message.id === 65, "with this completion");
+  const withThisLabels = withThisMembers.result.items.map((item) => item.label);
+  assert.ok(withThisLabels.includes("baseUrl"), "this inside with lost class members");
+  assert.ok(!withThisLabels.includes("remote"), "this inside with used the with receiver");
+
+  const withAtUri = "file:///test/withat.little";
+  const withAtText = [
+    ";; @class Opts",
+    ";; @field string remote",
+    ";;",
+    ";; @param Opts opts",
+    "fn use(opts) {",
+    "  with opts {",
+    "    @r",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: withAtUri, languageId: "little", version: 1, text: withAtText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === withAtUri, "with at diagnostics");
+
+  send({ jsonrpc: "2.0", id: 66, method: "textDocument/completion", params: { textDocument: { uri: withAtUri }, position: { line: 6, character: 6 } } });
+  const withAtMembers = await waitFor((message) => message.id === 66, "with at completion");
+  const withAtLabels = withAtMembers.result.items.map((item) => item.label);
+  assert.ok(withAtLabels.includes("remote"), "@ inside with lost the receiver");
+  assert.ok(!withAtLabels.includes("baseUrl"), "@ inside with used the class");
   const chainUri = "file:///test/chain.little";
   const chainSource = [
     "class A {",

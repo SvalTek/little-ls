@@ -938,12 +938,13 @@ static yyjson_mut_val* build_completion(yyjson_mut_doc* document, void* context)
 	if (separator == '.' || separator == ':' || separator == '@')
 	{
 		ltls_TypeSet types = 0;
-		lt_AstNode* class_node = 0;
+		lt_AstNode* self_node = 0;
 
 		if (separator == '@')
 		{
 			lt_AstNode* receiver = ltls_index_receiver_at(&state.index, offset);
-			if (receiver && receiver->type == LT_AST_NODE_CLASS) class_node = receiver;
+			if (receiver && (receiver->type == LT_AST_NODE_CLASS || receiver->type == LT_AST_NODE_TABLE))
+				self_node = receiver;
 			else if (receiver) types = ltls_index_type_of(&state.index, receiver);
 		}
 		else
@@ -951,29 +952,42 @@ static yyjson_mut_val* build_completion(yyjson_mut_doc* document, void* context)
 			lt_Token* token = token_ending_at(&state.analysis, start - 1);
 			if (token)
 			{
-				const ltls_Reference* reference = 0;
-				const ltls_Declaration* declaration =
-					ltls_index_resolve(&state.index, token->span.start, &reference);
-				types = declaration ? declaration->types : (reference ? reference->types : 0);
+				const char* receiver = token_name(&state.analysis, token);
+				if (receiver && strcmp(receiver, "this") == 0)
+					self_node = ltls_index_self_at(&state.index, offset);
+				else
+				{
+					const ltls_Reference* reference = 0;
+					const ltls_Declaration* declaration =
+						ltls_index_resolve(&state.index, token->span.start, &reference);
+					types = declaration ? declaration->types : (reference ? reference->types : 0);
+				}
 			}
 
-			if (!types)
+			if (!types && !self_node)
 			{
 				uint32_t begin = start - 1;
 				while (begin > 0 && is_name_character(text[begin - 1])) begin--;
 				if (begin + 1 < start)
 				{
-					const ltls_Declaration* declaration = declaration_named(&state.index,
-						text + begin, (size_t)(start - 1 - begin));
-					if (declaration) types = declaration->types;
+					const char* name = text + begin;
+					size_t length = (size_t)(start - 1 - begin);
+					if (length == 4 && strncmp(name, "this", 4) == 0)
+						self_node = ltls_index_self_at(&state.index, offset);
+					else
+					{
+						const ltls_Declaration* declaration = declaration_named(&state.index, name, length);
+						if (declaration) types = declaration->types;
+					}
 				}
 			}
 		}
 
 		const ltls_Declaration* members[512];
-		uint32_t count = class_node
-			? ltls_index_members(&state.index, class_node, members, 512)
-			: collect_members(&state.index, types, members, 512);
+		uint32_t count = !self_node ? collect_members(&state.index, types, members, 512)
+			: self_node->type == LT_AST_NODE_TABLE
+				? ltls_index_table_members(&state.index, self_node, members, 512)
+				: ltls_index_members(&state.index, self_node, members, 512);
 		add_matching_members(document, &state.index, members, count, prefix, prefix_length, items);
 	}
 	else
@@ -1032,6 +1046,24 @@ static yyjson_mut_val* build_completion(yyjson_mut_doc* document, void* context)
 			yyjson_mut_obj_add_strcpy(document, item, "label", keywords[i]);
 			yyjson_mut_obj_add_int(document, item, "kind", 14);
 			yyjson_mut_arr_add_val(items, item);
+		}
+
+		if (ltls_index_self_at(&state.index, offset) && strncmp("this", prefix, prefix_length) == 0)
+		{
+			uint8_t duplicate = 0;
+			for (uint32_t j = 0; j < claimed_count; j++)
+				if (strcmp(claimed[j], "this") == 0) { duplicate = 1; break; }
+
+			if (!duplicate)
+			{
+				if (claimed_count < 512) claimed[claimed_count++] = "this";
+
+				yyjson_mut_val* item = yyjson_mut_obj(document);
+				yyjson_mut_obj_add_strcpy(document, item, "label", "this");
+				yyjson_mut_obj_add_int(document, item, "kind", 14);
+				yyjson_mut_obj_add_strcpy(document, item, "detail", "the enclosing receiver");
+				yyjson_mut_arr_add_val(items, item);
+			}
 		}
 	}
 

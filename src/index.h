@@ -132,6 +132,10 @@ uint32_t ltls_index_table_members(const ltls_Index* index, lt_AstNode* table,
    or NULL. Used for `@` completion. */
 lt_AstNode* ltls_index_receiver_at(const ltls_Index* index, uint32_t offset);
 
+/* The enclosing class node or owning table literal at offset, ignoring `with`
+   receivers. Used for `this` completion. */
+lt_AstNode* ltls_index_self_at(const ltls_Index* index, uint32_t offset);
+
 /* Flow type recorded for an expression occurrence, or NULL. */
 ltls_TypeSet ltls_index_type_of(const ltls_Index* index, lt_AstNode* node);
 

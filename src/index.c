@@ -153,6 +153,15 @@ static void ensure_implicit_member(ltls_Index* index, lt_AstNode* target, lt_Ast
 	add_declaration(index, member, member->span, scope, class_node, 0, LTLS_DECL_FIELD, 0);
 }
 
+/* A table function whose first parameter is `this` is callable with `:`; the
+   table literal is its receiver shape. */
+static uint8_t receiver_function(const ltls_Index* index, const lt_AstNode* fn)
+{
+	if (!fn || fn->type != LT_AST_NODE_FN) return 0;
+	const char* first = token_text(index, fn->fn.args[0]);
+	return first && strcmp(first, "this") == 0;
+}
+
 static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_AstNode* class_node,
                       lt_Token* receiver_token, lt_AstNode* receiver_expr)
 {
@@ -321,7 +330,18 @@ static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_A
 				add_declaration(index, key->literal.token, key->literal.token->span, scope, node, 0,
 					LTLS_DECL_FIELD, 0);
 		}
-		walk_body(index, &node->table.values, scope, class_node, receiver_token, receiver_expr);
+		for (uint32_t i = 0; i < node->table.values.length; i++)
+		{
+			lt_AstNode* value = *AT(lt_AstNode*, node->table.values, i);
+			if (receiver_function(index, value))
+			{
+				/* `this` inside the function names the table, exactly as a colon
+				   call binds it. */
+				walk_node(index, value, scope, node, value->fn.args[0], 0);
+				continue;
+			}
+			walk_node(index, value, scope, class_node, receiver_token, receiver_expr);
+		}
 		break;
 
 	case LT_AST_NODE_IDENTIFIER:
@@ -966,6 +986,20 @@ static lt_AstNode* receiver_in_node(const ltls_Index* index, lt_AstNode* node, u
 	case LT_AST_NODE_WHILE:
 		return receiver_in_body(index, &node->loop.body, offset, class_node);
 
+	case LT_AST_NODE_TABLE:
+		for (uint32_t i = 0; i < node->table.values.length; i++)
+		{
+			lt_AstNode* value = *AT(lt_AstNode*, node->table.values, i);
+			if (receiver_function(index, value) && node_covers(value, offset))
+			{
+				lt_AstNode* found = receiver_in_node(index, value, offset, node);
+				return found ? found : node;
+			}
+			lt_AstNode* found = receiver_in_node(index, value, offset, class_node);
+			if (found) return found;
+		}
+		return 0;
+
 	case LT_AST_NODE_WITH: {
 		lt_AstNode* found = receiver_in_body(index, &node->with_stmt.body, offset, class_node);
 		return found ? found : node->with_stmt.expr;
@@ -980,6 +1014,95 @@ lt_AstNode* ltls_index_receiver_at(const ltls_Index* index, uint32_t offset)
 {
 	if (!index->analysis || !index->analysis->parser.root) return 0;
 	return receiver_in_node(index, index->analysis->parser.root, offset, 0);
+}
+
+static lt_AstNode* self_in_body(const ltls_Index* index, lt_Buffer* body, uint32_t offset,
+                                 lt_AstNode* class_node);
+static lt_AstNode* self_in_node(const ltls_Index* index, lt_AstNode* node, uint32_t offset,
+                                 lt_AstNode* class_node);
+
+static lt_AstNode* self_in_body(const ltls_Index* index, lt_Buffer* body, uint32_t offset,
+                                 lt_AstNode* class_node)
+{
+	for (uint32_t i = 0; i < body->length; i++)
+	{
+		lt_AstNode* found = self_in_node(index, *AT(lt_AstNode*, *body, i), offset, class_node);
+		if (found) return found;
+	}
+	return 0;
+}
+
+/* `this` never follows `with`; it keeps naming the enclosing class or the table literal that owns a receiver function. */
+static lt_AstNode* self_in_node(const ltls_Index* index, lt_AstNode* node, uint32_t offset,
+                                 lt_AstNode* class_node)
+{
+	if (!node_covers(node, offset)) return 0;
+
+	switch (node->type)
+	{
+	case LT_AST_NODE_CHUNK:
+		return self_in_body(index, &node->chunk.body, offset, class_node);
+
+	case LT_AST_NODE_DECLARE:
+		return self_in_node(index, node->declare.expr, offset, class_node);
+
+	case LT_AST_NODE_FN: {
+		lt_AstNode* found = self_in_body(index, &node->fn.body, offset, class_node);
+		return found ? found : class_node;
+	}
+
+	case LT_AST_NODE_CLASS:
+		for (uint32_t i = 0; i < node->class_decl.members.length; i++)
+		{
+			lt_ClassMember* member = AT(lt_ClassMember, node->class_decl.members, i);
+			if (!member->value || !node_covers(member->value, offset)) continue;
+			lt_AstNode* found = self_in_node(index, member->value, offset, node);
+			return found ? found : node;
+		}
+		return 0;
+
+	case LT_AST_NODE_TABLE:
+		for (uint32_t i = 0; i < node->table.values.length; i++)
+		{
+			lt_AstNode* value = *AT(lt_AstNode*, node->table.values, i);
+			if (receiver_function(index, value) && node_covers(value, offset))
+			{
+				lt_AstNode* found = self_in_node(index, value, offset, node);
+				return found ? found : node;
+			}
+			lt_AstNode* found = self_in_node(index, value, offset, class_node);
+			if (found) return found;
+		}
+		return 0;
+
+	case LT_AST_NODE_IF:
+	case LT_AST_NODE_ELSEIF:
+	case LT_AST_NODE_ELSE: {
+		lt_AstNode* found = self_in_body(index, &node->branch.body, offset, class_node);
+		if (found) return found;
+		return node->branch.next ? self_in_node(index, node->branch.next, offset, class_node) : class_node;
+	}
+
+	case LT_AST_NODE_FOR:
+	case LT_AST_NODE_WHILE: {
+		lt_AstNode* found = self_in_body(index, &node->loop.body, offset, class_node);
+		return found ? found : class_node;
+	}
+
+	case LT_AST_NODE_WITH: {
+		lt_AstNode* found = self_in_body(index, &node->with_stmt.body, offset, class_node);
+		return found ? found : class_node;
+	}
+
+	default:
+		return 0;
+	}
+}
+
+lt_AstNode* ltls_index_self_at(const ltls_Index* index, uint32_t offset)
+{
+	if (!index->analysis || !index->analysis->parser.root) return 0;
+	return self_in_node(index, index->analysis->parser.root, offset, 0);
 }
 
 /* `obj.name` and `@name` resolve through every alternative of the receiver's
