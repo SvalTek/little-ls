@@ -205,16 +205,16 @@ async function main() {
   const variableHover = await waitFor((message) => message.id === 8, "variable hover");
   assert.match(variableHover.result.contents.value, /var count/);
 
-  const memberUri = "file:///test/member.little";
+  const memberSymbolUri = "file:///test/member.little";
   const memberSource = "class Box {\n  value\n  read() {\n    return @value\n  }\n}\n";
   send({
     jsonrpc: "2.0",
     method: "textDocument/didOpen",
-    params: { textDocument: { uri: memberUri, languageId: "little", version: 1, text: memberSource } }
+    params: { textDocument: { uri: memberSymbolUri, languageId: "little", version: 1, text: memberSource } }
   });
-  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === memberUri, "member diagnostics");
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === memberSymbolUri, "member diagnostics");
 
-  send({ jsonrpc: "2.0", id: 9, method: "textDocument/hover", params: { textDocument: { uri: memberUri }, position: { line: 3, character: 13 } } });
+  send({ jsonrpc: "2.0", id: 9, method: "textDocument/hover", params: { textDocument: { uri: memberSymbolUri }, position: { line: 3, character: 13 } } });
   const memberHover = await waitFor((message) => message.id === 9, "member hover");
   assert.match(memberHover.result.contents.value, /field value/);
 
@@ -787,6 +787,73 @@ async function main() {
   send({ jsonrpc: "2.0", id: 68, method: "textDocument/hover", params: { textDocument: { uri: recoveryUri }, position: { line: 2, character: 7 } } });
   const recovered = await waitFor((message) => message.id === 68, "recovered statement hover");
   assert.match(recovered.result.contents.value, /var ok: number/);
+
+  const symbolUri = "file:///test/symbols.little";
+  const symbolText = "var count = 1\nio.print(count)\ncount = 2\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: symbolUri, languageId: "little", version: 1, text: symbolText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === symbolUri, "symbol diagnostics");
+
+  send({ jsonrpc: "2.0", id: 72, method: "textDocument/references", params: { textDocument: { uri: symbolUri }, position: { line: 0, character: 4 }, context: { includeDeclaration: true } } });
+  const references = await waitFor((message) => message.id === 72, "references");
+  assert.deepEqual(references.result.map((location) => location.range.start.line), [0, 1, 2]);
+
+  send({ jsonrpc: "2.0", id: 73, method: "textDocument/references", params: { textDocument: { uri: symbolUri }, position: { line: 0, character: 4 }, context: { includeDeclaration: false } } });
+  const referencesNoDeclaration = await waitFor((message) => message.id === 73, "references without declaration");
+  assert.deepEqual(referencesNoDeclaration.result.map((location) => location.range.start.line), [1, 2]);
+
+  send({ jsonrpc: "2.0", id: 74, method: "textDocument/documentHighlight", params: { textDocument: { uri: symbolUri }, position: { line: 2, character: 2 } } });
+  const highlights = await waitFor((message) => message.id === 74, "highlights");
+  assert.deepEqual(highlights.result.map((highlight) => highlight.range.start.line), [0, 1, 2]);
+  assert.ok(highlights.result.every((highlight) => highlight.kind === 1));
+
+  send({ jsonrpc: "2.0", id: 75, method: "textDocument/prepareRename", params: { textDocument: { uri: symbolUri }, position: { line: 0, character: 4 } } });
+  const prepare = await waitFor((message) => message.id === 75, "prepare rename");
+  assert.equal(prepare.result.placeholder, "count");
+  assert.deepEqual(prepare.result.range.start, { line: 0, character: 4 });
+
+  send({ jsonrpc: "2.0", id: 76, method: "textDocument/rename", params: { textDocument: { uri: symbolUri }, position: { line: 0, character: 4 }, newName: "total" } });
+  const rename = await waitFor((message) => message.id === 76, "rename");
+  const renameEdits = rename.result.changes[symbolUri];
+  assert.equal(renameEdits.length, 3);
+  assert.ok(renameEdits.every((edit) => edit.newText === "total"));
+
+  const memberSymbolsUri = "file:///test/members.little";
+  const memberText = "class A {\n  value\n}\nclass B {\n  value\n}\nvar a = A()\nio.print(a.value)\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: memberSymbolsUri, languageId: "little", version: 1, text: memberText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === memberSymbolsUri, "members diagnostics");
+
+  send({ jsonrpc: "2.0", id: 77, method: "textDocument/references", params: { textDocument: { uri: memberSymbolsUri }, position: { line: 7, character: 12 }, context: { includeDeclaration: true } } });
+  const memberReferences = await waitFor((message) => message.id === 77, "member references");
+  assert.deepEqual(memberReferences.result.map((location) => location.range.start.line), [1, 7]);
+
+  const unionUri = "file:///test/union.little";
+  const unionText = ";; @class One\n;; @field string name\n;;\n;; @class Two\n;; @field string name\n;;\n;; @param One|Two both\nfn f(both) {\n  io.print(both.name)\n}\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: unionUri, languageId: "little", version: 1, text: unionText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === unionUri, "union diagnostics");
+
+  send({ jsonrpc: "2.0", id: 78, method: "textDocument/prepareRename", params: { textDocument: { uri: unionUri }, position: { line: 9, character: 15 } } });
+  const unionPrepare = await waitFor((message) => message.id === 78, "union prepare rename");
+  assert.equal(unionPrepare.result, null);
+
+  send({ jsonrpc: "2.0", id: 79, method: "textDocument/prepareRename", params: { textDocument: { uri: memberSymbolsUri }, position: { line: 7, character: 4 } } });
+  const externalPrepare = await waitFor((message) => message.id === 79, "external prepare rename");
+  assert.equal(externalPrepare.result, null);
+
+  send({ jsonrpc: "2.0", id: 80, method: "textDocument/rename", params: { textDocument: { uri: memberSymbolsUri }, position: { line: 7, character: 4 }, newName: "output" } });
+  const externalRename = await waitFor((message) => message.id === 80, "external rename");
+  assert.equal(externalRename.result, null);
 
   send({ jsonrpc: "2.0", id: 69, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 14 } } });
   const tableThisTarget = await waitFor((message) => message.id === 69, "table this target hover");

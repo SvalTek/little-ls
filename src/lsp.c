@@ -748,6 +748,11 @@ static yyjson_mut_val* build_initialize(yyjson_mut_doc* document, void* context)
 	yyjson_mut_obj_add_bool(document, capabilities, "documentSymbolProvider", true);
 	yyjson_mut_obj_add_bool(document, capabilities, "hoverProvider", true);
 	yyjson_mut_obj_add_bool(document, capabilities, "definitionProvider", true);
+	yyjson_mut_obj_add_bool(document, capabilities, "referencesProvider", true);
+	yyjson_mut_obj_add_bool(document, capabilities, "documentHighlightProvider", true);
+	yyjson_mut_val* rename = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_bool(document, rename, "prepareProvider", true);
+	yyjson_mut_obj_add_val(document, capabilities, "renameProvider", rename);
 
 	yyjson_mut_val* completion = yyjson_mut_obj(document);
 	yyjson_mut_obj_add_bool(document, completion, "resolveProvider", false);
@@ -1342,6 +1347,245 @@ static yyjson_mut_val* build_signature_help(yyjson_mut_doc* document, void* cont
 	return result;
 }
 
+/* ------------------------------------------------------------------------- */
+/* References, highlights and rename */
+
+typedef struct {
+	ltls_PositionContext position;
+	const char* new_name;
+	uint8_t include_declaration;
+} ltls_SymbolContext;
+
+typedef struct {
+	ltls_Reference* items[2048];
+	uint32_t count;
+} ltls_ReferenceList;
+
+static uint8_t declaration_renameable(const ltls_Index* index, const ltls_Declaration* declaration)
+{
+	if (!declaration) return 0;
+	if (declaration->external) return 0;
+	if (declaration->is_global) return 0;
+	if (declaration->name->flags & LT_TOKEN_SYNTHETIC) return 0;
+
+	const char* name = ltls_index_token_text(index, declaration->name);
+	return name && strcmp(name, "this") != 0;
+}
+
+/* A member reached through a union receiver may resolve to more than one
+   declaration; renaming one of them would be a guess. */
+static uint8_t reference_ambiguous(const ltls_Index* index, const ltls_Reference* reference)
+{
+	if (!reference->member || !reference->receiver_expr) return 0;
+
+	ltls_TypeSet types = ltls_index_type_of(index, reference->receiver_expr);
+	if (!types) return 1;
+
+	uint32_t matches = 0;
+	for (ltls_TypeSet type = types; type; type = type->next)
+	{
+		const ltls_Declaration* declaration = 0;
+		if (type->kind == LTLS_TYPE_INSTANCE)
+			declaration = ltls_index_member(index, type->node, reference->token);
+		else if (type->kind == LTLS_TYPE_TABLE)
+			declaration = ltls_index_table_field(index, type->node, reference->token);
+		if (declaration) matches++;
+	}
+	return matches > 1;
+}
+
+static void collect_references(const ltls_Index* index, const ltls_Declaration* target, ltls_ReferenceList* list)
+{
+	list->count = 0;
+	for (uint32_t i = 0; i < index->reference_count; i++)
+	{
+		ltls_Reference* reference = &index->references[i];
+		if (reference->token->flags & LT_TOKEN_SYNTHETIC) continue;
+		if (ltls_index_resolve(index, reference->token->span.start, 0) != target) continue;
+		if (list->count < sizeof(list->items) / sizeof(list->items[0])) list->items[list->count++] = reference;
+	}
+}
+
+static uint8_t declaration_blocks_rename(const ltls_Index* index, const ltls_Declaration* declaration, ltls_ReferenceList* list)
+{
+	if (!declaration_renameable(index, declaration)) return 1;
+	collect_references(index, declaration, list);
+	for (uint32_t i = 0; i < list->count; i++)
+		if (reference_ambiguous(index, list->items[i])) return 1;
+	return 0;
+}
+
+static yyjson_mut_val* location_object(yyjson_mut_doc* document, const ltls_LineIndex* lines,
+                                       const char* text, const char* uri, lt_Span span)
+{
+	yyjson_mut_val* location = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_strcpy(document, location, "uri", uri);
+	yyjson_mut_obj_add_val(document, location, "range", range_object(document, lines, text, span));
+	return location;
+}
+
+static yyjson_mut_val* build_references(yyjson_mut_doc* document, void* context)
+{
+	ltls_SymbolContext* symbol = context;
+	ltls_PositionContext* position = &symbol->position;
+	if (!position->document) return 0;
+
+	ltls_AnalysisState state;
+	analysis_state_open(&state, position->document);
+	if (!state.vm) return 0;
+
+	const char* text = position->document->text;
+	uint32_t offset = position_to_offset(&state.lines, text, position->line, position->character);
+	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, 0);
+
+	yyjson_mut_val* locations = yyjson_mut_arr(document);
+	if (declaration && !declaration->external)
+	{
+		ltls_ReferenceList list;
+		collect_references(&state.index, declaration, &list);
+
+		if (symbol->include_declaration)
+			yyjson_mut_arr_add_val(locations,
+				location_object(document, &state.lines, text, position->document->uri, declaration->name->span));
+
+		for (uint32_t i = 0; i < list.count; i++)
+			yyjson_mut_arr_add_val(locations,
+				location_object(document, &state.lines, text, position->document->uri, list.items[i]->token->span));
+	}
+
+	analysis_state_close(&state);
+	return locations;
+}
+
+static yyjson_mut_val* build_highlights(yyjson_mut_doc* document, void* context)
+{
+	ltls_PositionContext* position = context;
+	if (!position->document) return 0;
+
+	ltls_AnalysisState state;
+	analysis_state_open(&state, position->document);
+	if (!state.vm) return 0;
+
+	const char* text = position->document->text;
+	uint32_t offset = position_to_offset(&state.lines, text, position->line, position->character);
+	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, 0);
+
+	yyjson_mut_val* highlights = yyjson_mut_arr(document);
+	if (declaration && !declaration->external)
+	{
+		ltls_ReferenceList list;
+		collect_references(&state.index, declaration, &list);
+
+		uint32_t count = 0;
+		lt_Span spans[2049];
+		spans[count++] = declaration->name->span;
+		for (uint32_t i = 0; i < list.count && count < 2049; i++) spans[count++] = list.items[i]->token->span;
+
+		for (uint32_t i = 0; i < count; i++)
+		{
+			yyjson_mut_val* highlight = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_val(document, highlight, "range",
+				range_object(document, &state.lines, text, spans[i]));
+			yyjson_mut_obj_add_int(document, highlight, "kind", 1); /* Text */
+			yyjson_mut_arr_add_val(highlights, highlight);
+		}
+	}
+
+	analysis_state_close(&state);
+	return highlights;
+}
+
+static uint8_t valid_name(const char* name)
+{
+	if (!name || !name[0]) return 0;
+	for (const char* cursor = name; *cursor; cursor++)
+	{
+		if ((*cursor >= 'a' && *cursor <= 'z') || (*cursor >= 'A' && *cursor <= 'Z') ||
+		    (*cursor >= '0' && *cursor <= '9') || *cursor == '_') continue;
+		return 0;
+	}
+	return 1;
+}
+
+static yyjson_mut_val* build_prepare_rename(yyjson_mut_doc* document, void* context)
+{
+	ltls_PositionContext* position = context;
+	if (!position->document) return 0;
+
+	ltls_AnalysisState state;
+	analysis_state_open(&state, position->document);
+	if (!state.vm) return 0;
+
+	const char* text = position->document->text;
+	uint32_t offset = position_to_offset(&state.lines, text, position->line, position->character);
+	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, 0);
+
+	yyjson_mut_val* result = 0;
+	if (declaration && !declaration->external && declaration_renameable(&state.index, declaration))
+	{
+		ltls_ReferenceList list;
+		if (declaration_blocks_rename(&state.index, declaration, &list) == 0)
+		{
+			const char* name = ltls_index_token_text(&state.index, declaration->name);
+			result = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_val(document, result, "range",
+				range_object(document, &state.lines, text, declaration->name->span));
+			yyjson_mut_obj_add_strcpy(document, result, "placeholder", name ? name : "");
+		}
+	}
+
+	analysis_state_close(&state);
+	return result;
+}
+
+static yyjson_mut_val* build_rename(yyjson_mut_doc* document, void* context)
+{
+	ltls_SymbolContext* symbol = context;
+	ltls_PositionContext* position = &symbol->position;
+	if (!position->document || !valid_name(symbol->new_name)) return 0;
+
+	ltls_AnalysisState state;
+	analysis_state_open(&state, position->document);
+	if (!state.vm) return 0;
+
+	const char* text = position->document->text;
+	uint32_t offset = position_to_offset(&state.lines, text, position->line, position->character);
+	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, 0);
+
+	yyjson_mut_val* result = 0;
+	if (declaration && !declaration->external)
+	{
+		ltls_ReferenceList list;
+		if (declaration_blocks_rename(&state.index, declaration, &list) == 0)
+		{
+			yyjson_mut_val* edits = yyjson_mut_arr(document);
+			yyjson_mut_val* declaration_edit = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_val(document, declaration_edit, "range",
+				range_object(document, &state.lines, text, declaration->name->span));
+			yyjson_mut_obj_add_strcpy(document, declaration_edit, "newText", symbol->new_name);
+			yyjson_mut_arr_add_val(edits, declaration_edit);
+
+			for (uint32_t i = 0; i < list.count; i++)
+			{
+				yyjson_mut_val* edit = yyjson_mut_obj(document);
+				yyjson_mut_obj_add_val(document, edit, "range",
+					range_object(document, &state.lines, text, list.items[i]->token->span));
+				yyjson_mut_obj_add_strcpy(document, edit, "newText", symbol->new_name);
+				yyjson_mut_arr_add_val(edits, edit);
+			}
+
+			yyjson_mut_val* changes = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_val(document, changes, position->document->uri, edits);
+
+			result = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_val(document, result, "changes", changes);
+		}
+	}
+
+	analysis_state_close(&state);
+	return result;
+}
+
 static void handle_message(ltls_Documents* documents, char* body, size_t length,
                            int* shutting_down)
 {
@@ -1431,6 +1675,40 @@ static void handle_message(ltls_Documents* documents, char* body, size_t length,
 
 		if (id)
 			send_message(id, method[13] == 'c' ? build_completion : build_signature_help, &context);
+	}
+	else if (strcmp(method, "textDocument/references") == 0 || strcmp(method, "textDocument/rename") == 0)
+	{
+		yyjson_val* document = params ? yyjson_obj_get(params, "textDocument") : 0;
+		const char* uri = object_string(document, "uri");
+		yyjson_val* position = params ? yyjson_obj_get(params, "position") : 0;
+		ltls_SymbolContext context;
+		context.position.document = uri ? ltls_documents_find(documents, uri) : 0;
+		context.position.line = (uint32_t)object_int(position, "line");
+		context.position.character = (uint32_t)object_int(position, "character");
+		context.new_name = object_string(params, "newName");
+		context.include_declaration = 0;
+		if (params)
+		{
+			yyjson_val* details = yyjson_obj_get(params, "context");
+			yyjson_val* include = details ? yyjson_obj_get(details, "includeDeclaration") : 0;
+			context.include_declaration = include && yyjson_get_bool(include);
+		}
+
+		if (id)
+			send_message(id, strcmp(method, "textDocument/references") == 0 ? build_references : build_rename, &context);
+	}
+	else if (strcmp(method, "textDocument/documentHighlight") == 0 || strcmp(method, "textDocument/prepareRename") == 0)
+	{
+		yyjson_val* document = params ? yyjson_obj_get(params, "textDocument") : 0;
+		const char* uri = object_string(document, "uri");
+		yyjson_val* position = params ? yyjson_obj_get(params, "position") : 0;
+		ltls_PositionContext context;
+		context.document = uri ? ltls_documents_find(documents, uri) : 0;
+		context.line = (uint32_t)object_int(position, "line");
+		context.character = (uint32_t)object_int(position, "character");
+
+		if (id)
+			send_message(id, strcmp(method, "textDocument/documentHighlight") == 0 ? build_highlights : build_prepare_rename, &context);
 	}
 	else if (strcmp(method, "textDocument/documentSymbol") == 0)
 	{
