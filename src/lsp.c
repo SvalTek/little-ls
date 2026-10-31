@@ -1,5 +1,7 @@
 #include "lsp.h"
 #include "documents.h"
+#include "docs.h"
+#include "index.h"
 
 #include "little.h"
 #include "yyjson.h"
@@ -259,6 +261,33 @@ static yyjson_mut_val* position_object(yyjson_mut_doc* document, const ltls_Line
 	return position;
 }
 
+/* Converts an LSP position (UTF-16 units) to a byte offset. */
+static uint32_t position_to_offset(const ltls_LineIndex* index, const char* text, uint32_t line, uint32_t character)
+{
+	if (!index->starts || line >= index->count) return (uint32_t)strlen(text);
+
+	uint32_t offset = index->starts[line];
+	uint32_t units = 0;
+
+	while (units < character)
+	{
+		unsigned char byte = (unsigned char)text[offset];
+		if (!byte || byte == '\n') break;
+
+		uint32_t width = 1;
+		uint32_t added = 1;
+		if (byte < 0x80) { width = 1; added = 1; }
+		else if ((byte & 0xE0) == 0xC0) { width = 2; added = 1; }
+		else if ((byte & 0xF0) == 0xE0) { width = 3; added = 1; }
+		else if ((byte & 0xF8) == 0xF0) { width = 4; added = 2; }
+
+		offset += width;
+		units += added;
+	}
+
+	return offset;
+}
+
 /* -------------------------------------------------------------------------
    Diagnostics
    ------------------------------------------------------------------------- */
@@ -422,6 +451,211 @@ static void emit_body_symbols(yyjson_mut_doc* document, yyjson_mut_val* list, lt
 }
 
 /* -------------------------------------------------------------------------
+   Hover and definition
+   ------------------------------------------------------------------------- */
+
+typedef struct {
+	const ltls_Document* document;
+	uint32_t line;
+	uint32_t character;
+} ltls_PositionContext;
+
+typedef struct {
+	char* text;
+	size_t length;
+	size_t capacity;
+} ltls_Markdown;
+
+typedef struct {
+	lt_VM* vm;
+	lt_Analysis analysis;
+	ltls_Index index;
+	ltls_LineIndex lines;
+} ltls_AnalysisState;
+
+static void markdown_append(ltls_Markdown* markdown, const char* text)
+{
+	if (!text) return;
+
+	size_t length = strlen(text);
+	if (markdown->length + length + 1 > markdown->capacity)
+	{
+		size_t capacity = markdown->capacity ? markdown->capacity : 64;
+		while (capacity < markdown->length + length + 1) capacity *= 2;
+		char* grown = realloc(markdown->text, capacity);
+		if (!grown) return;
+		markdown->text = grown;
+		markdown->capacity = capacity;
+	}
+	memcpy(markdown->text + markdown->length, text, length + 1);
+	markdown->length += length;
+}
+
+static void analysis_state_open(ltls_AnalysisState* state, const ltls_Document* document)
+{
+	memset(state, 0, sizeof(*state));
+	state->vm = lt_open(malloc, free, ignore_error);
+	if (!state->vm) return;
+
+	lt_analysis_run(state->vm, &state->analysis, document->text, document->uri);
+	ltls_index_build(&state->index, &state->analysis);
+	line_index_build(&state->lines, document->text);
+}
+
+static void analysis_state_close(ltls_AnalysisState* state)
+{
+	if (!state->vm) return;
+
+	ltls_index_free(&state->index);
+	line_index_free(&state->lines);
+	lt_analysis_free(state->vm, &state->analysis);
+	lt_destroy(state->vm);
+	state->vm = 0;
+}
+
+static yyjson_mut_val* range_object(yyjson_mut_doc* document, const ltls_LineIndex* lines,
+                                    const char* text, lt_Span span)
+{
+	yyjson_mut_val* range = yyjson_mut_obj(document);
+	yyjson_mut_obj_add_val(document, range, "start", position_object(document, lines, text, span.start));
+	yyjson_mut_obj_add_val(document, range, "end", position_object(document, lines, text, span.end));
+	return range;
+}
+
+static void markdown_append_docs(ltls_Markdown* markdown, const ltls_Doc* docs)
+{
+	if (docs->description && docs->description[0])
+	{
+		markdown_append(markdown, "\n");
+		markdown_append(markdown, docs->description);
+		markdown_append(markdown, "\n");
+	}
+
+	for (uint32_t i = 0; i < docs->param_count; i++)
+	{
+		const ltls_DocParam* param = &docs->params[i];
+		markdown_append(markdown, "\n- `");
+		markdown_append(markdown, param->name);
+		markdown_append(markdown, "`");
+		if (param->type)
+		{
+			markdown_append(markdown, " *");
+			markdown_append(markdown, param->type);
+			markdown_append(markdown, "*");
+		}
+		if (param->default_value)
+		{
+			markdown_append(markdown, " default `");
+			markdown_append(markdown, param->default_value);
+			markdown_append(markdown, "`");
+		}
+		if (param->description && param->description[0])
+		{
+			markdown_append(markdown, " — ");
+			markdown_append(markdown, param->description);
+		}
+	}
+
+	for (uint32_t i = 0; i < docs->return_count; i++)
+	{
+		const ltls_DocReturn* entry = &docs->returns[i];
+		markdown_append(markdown, "\n- returns");
+		if (entry->type)
+		{
+			markdown_append(markdown, " *");
+			markdown_append(markdown, entry->type);
+			markdown_append(markdown, "*");
+		}
+		if (entry->name)
+		{
+			markdown_append(markdown, " `");
+			markdown_append(markdown, entry->name);
+			markdown_append(markdown, "`");
+		}
+		if (entry->description && entry->description[0])
+		{
+			markdown_append(markdown, " — ");
+			markdown_append(markdown, entry->description);
+		}
+	}
+
+	for (uint32_t i = 0; i < docs->tag_count; i++)
+	{
+		markdown_append(markdown, "\n\n");
+		markdown_append(markdown, docs->tags[i]);
+	}
+}
+
+static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
+{
+	ltls_PositionContext* position = context;
+	if (!position->document) return 0;
+
+	ltls_AnalysisState state;
+	analysis_state_open(&state, position->document);
+	if (!state.vm) return 0;
+
+	uint32_t offset = position_to_offset(&state.lines, position->document->text, position->line, position->character);
+	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, 0);
+
+	yyjson_mut_val* result = 0;
+	if (declaration)
+	{
+		char* signature = ltls_declaration_signature(&state.index, declaration);
+		ltls_Doc docs;
+		uint8_t has_docs = declaration->name->line > 0 &&
+			ltls_doc_for_line(&state.analysis.tokens, declaration->name->line, &docs);
+
+		ltls_Markdown markdown = { 0 };
+		markdown_append(&markdown, "```little\n");
+		markdown_append(&markdown, signature ? signature : "");
+		markdown_append(&markdown, "\n```\n");
+		if (has_docs) markdown_append_docs(&markdown, &docs);
+		if (!markdown.text) markdown_append(&markdown, "");
+
+		result = yyjson_mut_obj(document);
+		yyjson_mut_val* contents = yyjson_mut_obj(document);
+		yyjson_mut_obj_add_strcpy(document, contents, "kind", "markdown");
+		yyjson_mut_obj_add_strcpy(document, contents, "value", markdown.text);
+		yyjson_mut_obj_add_val(document, result, "contents", contents);
+		yyjson_mut_obj_add_val(document, result, "range",
+			range_object(document, &state.lines, position->document->text, declaration->name->span));
+
+		free(markdown.text);
+		free(signature);
+		if (has_docs) ltls_doc_free(&docs);
+	}
+
+	analysis_state_close(&state);
+	return result;
+}
+
+static yyjson_mut_val* build_definition(yyjson_mut_doc* document, void* context)
+{
+	ltls_PositionContext* position = context;
+	if (!position->document) return 0;
+
+	ltls_AnalysisState state;
+	analysis_state_open(&state, position->document);
+	if (!state.vm) return 0;
+
+	uint32_t offset = position_to_offset(&state.lines, position->document->text, position->line, position->character);
+	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, 0);
+
+	yyjson_mut_val* result = 0;
+	if (declaration)
+	{
+		result = yyjson_mut_obj(document);
+		yyjson_mut_obj_add_strcpy(document, result, "uri", position->document->uri);
+		yyjson_mut_obj_add_val(document, result, "range",
+			range_object(document, &state.lines, position->document->text, declaration->name->span));
+	}
+
+	analysis_state_close(&state);
+	return result;
+}
+
+/* -------------------------------------------------------------------------
    Requests
    ------------------------------------------------------------------------- */
 
@@ -434,6 +668,8 @@ static yyjson_mut_val* build_initialize(yyjson_mut_doc* document, void* context)
 	yyjson_mut_val* capabilities = yyjson_mut_obj(document);
 	yyjson_mut_obj_add_int(document, capabilities, "textDocumentSync", 1);
 	yyjson_mut_obj_add_bool(document, capabilities, "documentSymbolProvider", true);
+	yyjson_mut_obj_add_bool(document, capabilities, "hoverProvider", true);
+	yyjson_mut_obj_add_bool(document, capabilities, "definitionProvider", true);
 	yyjson_mut_obj_add_val(document, result, "capabilities", capabilities);
 
 	yyjson_mut_val* info = yyjson_mut_obj(document);
@@ -550,6 +786,19 @@ static void handle_message(ltls_Documents* documents, char* body, size_t length,
 			ltls_documents_remove(documents, uri);
 			publish_diagnostics(uri, 0, "");
 		}
+	}
+	else if (strcmp(method, "textDocument/hover") == 0 || strcmp(method, "textDocument/definition") == 0)
+	{
+		yyjson_val* document = params ? yyjson_obj_get(params, "textDocument") : 0;
+		const char* uri = object_string(document, "uri");
+		yyjson_val* position = params ? yyjson_obj_get(params, "position") : 0;
+		ltls_PositionContext context;
+		context.document = uri ? ltls_documents_find(documents, uri) : 0;
+		context.line = (uint32_t)object_int(position, "line");
+		context.character = (uint32_t)object_int(position, "character");
+
+		if (id)
+			send_message(id, method[13] == 'h' ? build_hover : build_definition, &context);
 	}
 	else if (strcmp(method, "textDocument/documentSymbol") == 0)
 	{

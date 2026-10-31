@@ -168,8 +168,58 @@ async function main() {
   const operatorSymbols = await waitFor((message) => message.id === 4, "operator symbols");
   assert.deepEqual(operatorSymbols.result.map((symbol) => [symbol.name, symbol.kind]), [["Point", 5]]);
 
-  send({ jsonrpc: "2.0", id: 5, method: "shutdown" });
-  const shutdown = await waitFor((message) => message.id === 5, "shutdown");
+  const docsUri = "file:///test/docs.little";
+  const docsSource = [
+    ";; Adds one to a counter.",
+    ";; @param number amount [1] how much to add",
+    ";; @return number the new total",
+    "fn increment(amount) {",
+    "  return amount",
+    "}",
+    "",
+    "var count = 0",
+    "io.print(increment(count))",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: docsUri, languageId: "little", version: 1, text: docsSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === docsUri, "docs diagnostics");
+
+  send({ jsonrpc: "2.0", id: 6, method: "textDocument/hover", params: { textDocument: { uri: docsUri }, position: { line: 8, character: 12 } } });
+  const functionHover = await waitFor((message) => message.id === 6, "function hover");
+  assert.match(functionHover.result.contents.value, /fn increment\(amount\)/);
+  assert.match(functionHover.result.contents.value, /Adds one to a counter/);
+  assert.match(functionHover.result.contents.value, /how much to add/);
+
+  send({ jsonrpc: "2.0", id: 7, method: "textDocument/definition", params: { textDocument: { uri: docsUri }, position: { line: 8, character: 19 } } });
+  const countDefinition = await waitFor((message) => message.id === 7, "count definition");
+  assert.equal(countDefinition.result.uri, docsUri);
+  assert.equal(countDefinition.result.range.start.line, 7);
+  assert.equal(countDefinition.result.range.start.character, 4);
+  assert.equal(countDefinition.result.range.end.character, 9);
+
+  send({ jsonrpc: "2.0", id: 8, method: "textDocument/hover", params: { textDocument: { uri: docsUri }, position: { line: 8, character: 19 } } });
+  const variableHover = await waitFor((message) => message.id === 8, "variable hover");
+  assert.match(variableHover.result.contents.value, /var count/);
+
+  const memberUri = "file:///test/member.little";
+  const memberSource = "class Box {\n  value\n  read() {\n    return @value\n  }\n}\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: memberUri, languageId: "little", version: 1, text: memberSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === memberUri, "member diagnostics");
+
+  send({ jsonrpc: "2.0", id: 9, method: "textDocument/hover", params: { textDocument: { uri: memberUri }, position: { line: 3, character: 13 } } });
+  const memberHover = await waitFor((message) => message.id === 9, "member hover");
+  assert.match(memberHover.result.contents.value, /field value/);
+
+  send({ jsonrpc: "2.0", id: 10, method: "shutdown" });
+  const shutdown = await waitFor((message) => message.id === 10, "shutdown");
   assert.equal(shutdown.result, null);
 
   send({ jsonrpc: "2.0", method: "exit" });
