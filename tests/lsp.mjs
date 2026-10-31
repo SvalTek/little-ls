@@ -964,6 +964,56 @@ async function main() {
   assert.match((await arrayHover(96, 18, 4)).result.contents.value, /var item: table/);
   assert.match((await arrayHover(97, 19, 15)).result.contents.value, /field ok: bool/);
 
+  const multiUri = "file:///test/multi.little";
+  const multiText = [
+    "fn pair() {",
+    "    return unpack([1, \"two\"])",
+    "}",
+    "fn forward() {",
+    "    return pair()",
+    "}",
+    "var [a, b] = pair()",
+    "var [m, n] = forward()",
+    "var [x, y, z] = unpack([1, 2])",
+    "var s = pair()",
+    "var fwd = forward()",
+    "var [p, q] = unpack([\"one\", \"two\", \"three\"])",
+    "var strings = [\"a\", \"b\"]",
+    "var [u, v] = strings",
+    "var [t] = unpack(strings)",
+    "var table = { name: \"n\", count: 2 }",
+    "var { name, count } = table",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: multiUri, languageId: "little", version: 1, text: multiText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === multiUri, "multi diagnostics");
+
+  async function multiHover(id, line, character) {
+    send({ jsonrpc: "2.0", id, method: "textDocument/hover", params: { textDocument: { uri: multiUri }, position: { line, character } } });
+    return waitFor((message) => message.id === id, `multi hover ${line}`);
+  }
+
+  assert.match((await multiHover(98, 6, 5)).result.contents.value, /var a: number/);
+  assert.match((await multiHover(99, 6, 8)).result.contents.value, /var b: string/);
+  assert.match((await multiHover(100, 7, 5)).result.contents.value, /var m: number/);
+  assert.match((await multiHover(101, 7, 8)).result.contents.value, /var n: string/);
+  assert.match((await multiHover(102, 8, 5)).result.contents.value, /var x: number/);
+  assert.match((await multiHover(103, 8, 8)).result.contents.value, /var y: number/);
+  assert.match((await multiHover(104, 8, 11)).result.contents.value, /var z: null/);
+  assert.match((await multiHover(105, 9, 4)).result.contents.value, /var s: number/);
+  assert.match((await multiHover(106, 10, 4)).result.contents.value, /var fwd: number/);
+  assert.match((await multiHover(107, 11, 5)).result.contents.value, /var p: string/);
+  assert.match((await multiHover(108, 11, 8)).result.contents.value, /var q: string/);
+  assert.match((await multiHover(109, 13, 5)).result.contents.value, /var u: string/);
+  assert.match((await multiHover(110, 13, 8)).result.contents.value, /var v: string/);
+  assert.match((await multiHover(111, 14, 5)).result.contents.value, /var t: string/);
+  assert.match((await multiHover(112, 16, 7)).result.contents.value, /var name: string/);
+  assert.match((await multiHover(113, 16, 13)).result.contents.value, /var count: number/);
+
   send({ jsonrpc: "2.0", id: 69, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 14 } } });
   const tableThisTarget = await waitFor((message) => message.id === 69, "table this target hover");
   assert.match(tableThisTarget.result.contents.value, /this: table/);

@@ -784,6 +784,8 @@ void ltls_index_free(ltls_Index* index)
 	free(index->token_texts);
 	for (uint32_t i = 0; i < index->shape_count; i++) free(index->shapes[i].text);
 	free(index->shapes);
+	for (uint32_t i = 0; i < index->tuple_count; i++) free(index->tuples[i].items);
+	free(index->tuples);
 	for (uint32_t i = 0; i < index->token_allocation_count; i++) free(index->token_allocations[i]);
 	free(index->token_allocations);
 	for (uint32_t i = 0; i < index->node_allocation_count; i++) free(index->node_allocations[i]);
@@ -1293,6 +1295,13 @@ static const ltls_Declaration* resolve_receiver_types(const ltls_Index* index, l
 	return 0;
 }
 
+static lt_AstNode* function_node(const ltls_Declaration* declaration);
+
+lt_AstNode* ltls_index_function_node(const ltls_Declaration* declaration)
+{
+	return function_node(declaration);
+}
+
 const ltls_Declaration* ltls_index_resolve(const ltls_Index* index, uint32_t offset, const ltls_Reference** reference)
 {
 	if (reference) *reference = 0;
@@ -1435,6 +1444,84 @@ ltls_TypeSet ltls_type_array(ltls_Index* index, ltls_TypeSet element)
 
 	ltls_index_set_array_element(index, node, element);
 	return ltls_type_add(index, 0, LTLS_TYPE_ARRAY, node);
+}
+
+const ltls_Tuple* ltls_index_tuple(const ltls_Index* index, lt_AstNode* node)
+{
+	for (uint32_t i = 0; i < index->tuple_count; i++)
+		if (index->tuples[i].node == node) return &index->tuples[i];
+	return 0;
+}
+
+static ltls_TypeSet tuple_first(ltls_Index* index, const ltls_Tuple* tuple)
+{
+	if (!tuple) return 0;
+	if (!tuple->known) return tuple->element;
+	if (tuple->count == 0) return ltls_type_add(index, 0, LTLS_TYPE_NULL, 0);
+	return tuple->items[0];
+}
+
+void ltls_index_set_tuple(ltls_Index* index, lt_AstNode* node, ltls_TypeSet element,
+                          const ltls_TypeSet* items, uint32_t count, uint8_t known)
+{
+	for (uint32_t i = 0; i < index->tuple_count; i++)
+	{
+		ltls_Tuple* tuple = &index->tuples[i];
+		if (tuple->node != node) continue;
+
+		tuple->element = ltls_type_union(index, tuple->element, element);
+		if (tuple->known && known && tuple->count == count)
+		{
+			for (uint32_t p = 0; p < count; p++)
+				tuple->items[p] = ltls_type_union(index, tuple->items[p], items[p]);
+		}
+		else if (tuple->known && known)
+		{
+			/* Different arities: keep the element type, drop positions. */
+			free(tuple->items);
+			tuple->items = 0;
+			tuple->count = 0;
+			tuple->known = 0;
+		}
+		/* An unknown new stream can only relax a known one. */
+		else if (tuple->known && !known)
+		{
+			free(tuple->items);
+			tuple->items = 0;
+			tuple->count = 0;
+			tuple->known = 0;
+		}
+
+		ltls_index_add_return(index, node, tuple_first(index, tuple));
+		return;
+	}
+
+	ltls_Tuple* tuples = realloc(index->tuples, sizeof(ltls_Tuple) * (index->tuple_count + 1));
+	if (!tuples) return;
+
+	index->tuples = tuples;
+	ltls_Tuple* tuple = &index->tuples[index->tuple_count++];
+	tuple->node = node;
+	tuple->known = known;
+	tuple->count = known ? count : 0;
+	tuple->element = element;
+	tuple->items = 0;
+
+	if (known && count)
+	{
+		tuple->items = malloc(sizeof(ltls_TypeSet) * count);
+		if (tuple->items)
+		{
+			for (uint32_t p = 0; p < count; p++) tuple->items[p] = items[p];
+		}
+		else
+		{
+			tuple->known = 0;
+			tuple->count = 0;
+		}
+	}
+
+	ltls_index_add_return(index, node, tuple_first(index, tuple));
 }
 
 void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffer, size_t size)

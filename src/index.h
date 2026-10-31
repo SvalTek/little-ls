@@ -82,6 +82,14 @@ typedef struct {
 } ltls_Shape;
 
 typedef struct {
+	lt_AstNode* node;
+	uint8_t known;        /* arity and per-position types are exact */
+	uint32_t count;
+	ltls_TypeSet* items;  /* one per position when known */
+	ltls_TypeSet element; /* homogeneous element when arity is unknown */
+} ltls_Tuple;
+
+typedef struct {
 	const lt_Tokenizer* tokens;
 	const char* source;
 	ltls_Declaration* declarations;
@@ -98,6 +106,10 @@ typedef struct {
 	/* array node -> element union (absent or null means unknown) */
 	ltls_TypedNode* array_elements;
 	uint32_t array_element_count;
+
+	/* function node -> return stream from `unpack(...)` or a forwarded call */
+	ltls_Tuple* tuples;
+	uint32_t tuple_count;
 
 	/* text for synthetic tokens created from doc shapes */
 	ltls_TokenText* token_texts;
@@ -168,6 +180,14 @@ ltls_TypeSet ltls_index_add_return(ltls_Index* index, lt_AstNode* node, ltls_Typ
 ltls_TypeSet ltls_type_array(ltls_Index* index, ltls_TypeSet element);
 ltls_TypeSet ltls_index_array_element(const ltls_Index* index, lt_AstNode* node);
 void ltls_index_set_array_element(ltls_Index* index, lt_AstNode* node, ltls_TypeSet element);
+
+/* Return stream of a function that produces multiple values. */
+void ltls_index_set_tuple(ltls_Index* index, lt_AstNode* node, ltls_TypeSet element,
+                          const ltls_TypeSet* items, uint32_t count, uint8_t known);
+const ltls_Tuple* ltls_index_tuple(const ltls_Index* index, lt_AstNode* node);
+
+/* The FN node for a declaration, when it declares one. */
+lt_AstNode* ltls_index_function_node(const ltls_Declaration* declaration);
 
 /* Renders a type set such as `LLMProvider` or `number | string`. */
 void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffer, size_t size);

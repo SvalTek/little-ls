@@ -263,6 +263,98 @@ static ltls_TypeSet member_type(ltls_Context* context, ltls_TypeSet receiver, lt
 	return result;
 }
 
+#define LTLS_TUPLE_MAX 16
+
+static lt_Token* callee_token(lt_AstNode* callee)
+{
+	if (!callee) return 0;
+	if (callee->type == LT_AST_NODE_IDENTIFIER) return callee->identifier.token;
+	if (callee->type == LT_AST_NODE_INDEX) return member_token(callee->index.idx);
+	return 0;
+}
+
+static const ltls_Declaration* call_declaration(ltls_Context* context, lt_AstNode* call)
+{
+	if (!call || call->type != LT_AST_NODE_CALL) return 0;
+	lt_Token* token = callee_token(call->call.callee);
+	return token ? ltls_index_resolve(context->index, token->span.start, 0) : 0;
+}
+
+static uint8_t declaration_is_unpack(const ltls_Declaration* declaration)
+{
+	return declaration && declaration->external && declaration->signature &&
+	       strncmp(declaration->signature, "fn unpack(", 10) == 0;
+}
+
+static ltls_TypeSet array_element_types(ltls_Context* context, ltls_TypeSet types)
+{
+	ltls_TypeSet element = 0;
+	for (ltls_TypeSet type = types; type; type = type->next)
+		if (type->kind == LTLS_TYPE_ARRAY)
+			element = ltls_type_union(context->index, element,
+				ltls_index_array_element(context->index, type->node));
+	return element;
+}
+
+/* The values `unpack(array)` produces: positional when the argument is an
+   array literal, otherwise a homogeneous element with unknown arity. */
+static void unpack_stream(ltls_Context* context, lt_AstNode* call, ltls_TypeSet* element,
+                          ltls_TypeSet* items, uint32_t* count, uint8_t* known)
+{
+	*element = 0;
+	*count = 0;
+	*known = 0;
+
+	lt_AstNode* argument = call->call.args[0];
+	if (!argument) return;
+
+	*element = array_element_types(context, ltls_index_type_of(context->index, argument));
+	if (argument->type != LT_AST_NODE_ARRAY) return;
+
+	uint32_t length = argument->array.values.length;
+	if (length > LTLS_TUPLE_MAX) return;
+
+	*known = 1;
+	*count = length;
+	for (uint32_t i = 0; i < length; i++)
+	{
+		lt_AstNode* value = *AT(lt_AstNode*, argument->array.values, i);
+		items[i] = ltls_index_type_of(context->index, value);
+		*element = ltls_type_union(context->index, *element, items[i]);
+	}
+}
+
+/* Return stream of a call that forwards multiple values: `unpack(...)` or a
+   call to a function already known to produce several values. */
+static uint8_t call_stream(ltls_Context* context, lt_AstNode* call, ltls_TypeSet* element,
+                           ltls_TypeSet* items, uint32_t* count, uint8_t* known)
+{
+	*element = 0;
+	*count = 0;
+	*known = 0;
+
+	const ltls_Declaration* declaration = call_declaration(context, call);
+	if (declaration_is_unpack(declaration))
+	{
+		unpack_stream(context, call, element, items, count, known);
+		return 1;
+	}
+
+	lt_AstNode* fn = declaration ? ltls_index_function_node(declaration) : 0;
+	const ltls_Tuple* tuple = fn ? ltls_index_tuple(context->index, fn) : 0;
+	if (tuple)
+	{
+		*element = tuple->element;
+		*known = tuple->known;
+		*count = tuple->count;
+		if (tuple->known)
+			for (uint32_t i = 0; i < tuple->count && i < LTLS_TUPLE_MAX; i++) items[i] = tuple->items[i];
+		return 1;
+	}
+
+	return 0;
+}
+
 static void apply_function_docs(ltls_Context* context, lt_AstNode* fn)
 {
 	ltls_Doc doc;
@@ -349,6 +441,19 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 
 	const ltls_Declaration* declaration = callee_token
 		? ltls_index_resolve(context->index, callee_token->span.start, 0) : 0;
+
+	if (declaration_is_unpack(declaration))
+	{
+		ltls_TypeSet element = 0;
+		ltls_TypeSet items[LTLS_TUPLE_MAX];
+		uint32_t count = 0;
+		uint8_t known = 0;
+		unpack_stream(context, node, &element, items, &count, &known);
+		result = known
+			? (count ? items[0] : ltls_type_add(context->index, 0, LTLS_TYPE_NULL, 0))
+			: element;
+		return result;
+	}
 
 	if (declaration && declaration->external && declaration->signature &&
 	    (strstr(declaration->signature, "array.slice(") || strstr(declaration->signature, "array.reverse(")))
@@ -546,6 +651,17 @@ static ltls_TypeSet analyze_expression(ltls_Context* context, lt_AstNode* node)
 
 	case LT_AST_NODE_RETURN: {
 		type = analyze_expression(context, node->ret.expr);
+
+		if (context->function && node->ret.expr && node->ret.expr->type == LT_AST_NODE_CALL)
+		{
+			ltls_TypeSet element = 0;
+			ltls_TypeSet items[LTLS_TUPLE_MAX];
+			uint32_t count = 0;
+			uint8_t known = 0;
+			if (call_stream(context, node->ret.expr, &element, items, &count, &known))
+				ltls_index_set_tuple(context->index, context->function, element, items, count, known);
+		}
+
 		if (context->function)
 		{
 			ltls_TypeSet before = ltls_index_returns(context->index, context->function);
@@ -650,12 +766,72 @@ static void analyze_statement(ltls_Context* context, lt_AstNode* node)
 		ltls_TypeSet annotated = annotated_type(context, node->loc.line);
 		if (annotated) type = annotated;
 
-		ltls_Declaration* declaration = declaration_for_token(context->index, node->declare.identifier);
-		if (declaration)
+		if (node->declare.destructure == LT_DESTRUCT_ARRAY)
 		{
-			if (type) write_declaration(context, declaration, type);
-			ltls_index_set_type(context->index, node, type);
+			ltls_TypeSet element = 0;
+			ltls_TypeSet items[LTLS_TUPLE_MAX];
+			uint32_t count = 0;
+			uint8_t known = 0;
+			lt_AstNode* source = node->declare.expr;
+
+			if (!call_stream(context, source, &element, items, &count, &known))
+			{
+				if (source && source->type == LT_AST_NODE_ARRAY)
+				{
+					uint32_t length = source->array.values.length;
+					if (length <= LTLS_TUPLE_MAX)
+					{
+						known = 1;
+						count = length;
+						for (uint32_t i = 0; i < length; i++)
+						{
+							items[i] = ltls_index_type_of(context->index,
+								*AT(lt_AstNode*, source->array.values, i));
+							element = ltls_type_union(context->index, element, items[i]);
+						}
+					}
+				}
+				else element = array_element_types(context, type);
+			}
+
+			for (uint32_t i = 0; i < node->declare.entries.length; i++)
+			{
+				lt_DestructureEntry* entry = AT(lt_DestructureEntry, node->declare.entries, i);
+				ltls_Declaration* target = declaration_for_token(context->index, entry->local);
+				if (!target) continue;
+
+				ltls_TypeSet value = known
+					? (i < count ? items[i] : ltls_type_add(context->index, 0, LTLS_TYPE_NULL, 0))
+					: element;
+				if (value) write_declaration(context, target, value);
+			}
 		}
+		else if (node->declare.destructure == LT_DESTRUCT_TABLE)
+		{
+			for (uint32_t i = 0; i < node->declare.entries.length; i++)
+			{
+				lt_DestructureEntry* entry = AT(lt_DestructureEntry, node->declare.entries, i);
+				ltls_Declaration* target = declaration_for_token(context->index, entry->local);
+				if (!target || !entry->key) continue;
+
+				ltls_TypeSet value = 0;
+				for (ltls_TypeSet type_set = type; type_set; type_set = type_set->next)
+				{
+					if (type_set->kind != LTLS_TYPE_TABLE) continue;
+					const ltls_Declaration* field =
+						ltls_index_table_field(context->index, type_set->node, entry->key);
+					if (field) value = ltls_type_union(context->index, value, field->types);
+				}
+				if (value) write_declaration(context, target, value);
+			}
+		}
+		else
+		{
+			ltls_Declaration* declaration = declaration_for_token(context->index, node->declare.identifier);
+			if (declaration && type) write_declaration(context, declaration, type);
+		}
+
+		ltls_index_set_type(context->index, node, type);
 	} break;
 
 	case LT_AST_NODE_CLASS:
