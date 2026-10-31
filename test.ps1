@@ -38,6 +38,28 @@ if ($LASTEXITCODE -ne 0) {
     throw "Analysis tests failed with exit code $LASTEXITCODE"
 }
 
+$docsExe = Join-Path $outDir "docs-tests.exe"
+& $Compiler -std=c11 -O1 -g `
+    -I (Join-Path $LittleRoot "src") `
+    -I (Join-Path $repo "src") `
+    (Join-Path $repo "tests/docs.c") `
+    (Join-Path $repo "src/docs.c") `
+    (Join-Path $LittleRoot "src/little.c") `
+    (Join-Path $LittleRoot "src/little_analysis.c") `
+    (Join-Path $LittleRoot "src/little_buffer.c") `
+    (Join-Path $LittleRoot "src/little_common.c") `
+    (Join-Path $LittleRoot "src/little_async.c") `
+    -o $docsExe
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Docs test build failed with exit code $LASTEXITCODE"
+}
+
+& $docsExe
+if ($LASTEXITCODE -ne 0) {
+    throw "Docs tests failed with exit code $LASTEXITCODE"
+}
+
 & (Join-Path $repo "build.ps1") -LittleRoot $LittleRoot
 if ($LASTEXITCODE -ne 0) {
     throw "Server build failed with exit code $LASTEXITCODE"
