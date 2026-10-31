@@ -32,6 +32,7 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     (Join-Path $repo "src/documents.c") `
     (Join-Path $repo "src/docs.c") `
     (Join-Path $repo "src/index.c") `
+    (Join-Path $repo "src/types.c") `
     (Join-Path $LittleRoot "src/little.c") `
     (Join-Path $LittleRoot "src/little_analysis.c") `
     (Join-Path $LittleRoot "src/little_buffer.c") `

@@ -46,22 +46,25 @@ static void add_declaration(ltls_Index* index, lt_Token* name, lt_Span span, lt_
 	declaration.scope = scope;
 	declaration.node = node;
 	declaration.member = member;
+	declaration.types = 0;
 	declaration.kind = kind;
 	declaration.is_global = is_global;
 	push_declaration(index, declaration);
 }
 
-static void add_reference(ltls_Index* index, lt_Token* token, lt_Scope* scope, lt_AstNode* class_node,
-                          lt_AstNode* receiver_expr, uint8_t member)
+static void add_reference(ltls_Index* index, lt_Token* token, lt_AstNode* node, lt_Scope* scope,
+                          lt_AstNode* class_node, lt_AstNode* receiver_expr, uint8_t member)
 {
 	if (!token || is_synthetic(token)) return;
 
 	ltls_Reference reference;
 	reference.token = token;
+	reference.node = node;
 	reference.scope = scope;
 	reference.class_node = class_node;
 	reference.receiver_expr = receiver_expr;
 	reference.member = member;
+	reference.types = 0;
 	push_reference(index, reference);
 }
 
@@ -103,6 +106,14 @@ static void walk_class_member(ltls_Index* index, lt_AstNode* klass, lt_ClassMemb
 static uint8_t is_name_token(const lt_Token* token)
 {
 	return token && (token->type == LT_TOKEN_IDENTIFIER || (token->type >= LT_TOKEN_FN && token->type <= LT_TOKEN_RETURN));
+}
+
+static lt_Token* member_token(lt_AstNode* idx)
+{
+	if (!idx) return 0;
+	if (idx->type == LT_AST_NODE_LITERAL) return idx->literal.token;
+	if (idx->type == LT_AST_NODE_IDENTIFIER) return idx->identifier.token;
+	return 0;
 }
 
 static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_AstNode* class_node,
@@ -206,16 +217,23 @@ static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_A
 
 			if (is_receiver || is_this)
 			{
-				lt_Token* field = 0;
-				if (idx && idx->type == LT_AST_NODE_LITERAL) field = idx->literal.token;
-				else if (idx && idx->type == LT_AST_NODE_IDENTIFIER) field = idx->identifier.token;
+				lt_Token* field = member_token(idx);
 
 				/* `this.name` always means the instance; `@name` means whichever
 				   receiver is active, which `with` changes. */
 				lt_AstNode* target = is_receiver ? receiver_expr : 0;
-				if (field) add_reference(index, field, scope, class_node, target, 1);
+				if (field) add_reference(index, field, node, scope, class_node, target, 1);
 				break;
 			}
+		}
+
+		lt_Token* member = member_token(idx);
+		if (member && is_name_token(member))
+		{
+			/* obj.name / p:method() resolve through the receiver's type. */
+			add_reference(index, member, node, scope, class_node, source, 1);
+			walk_node(index, source, scope, class_node, receiver_token, receiver_expr);
+			break;
 		}
 
 		walk_node(index, source, scope, class_node, receiver_token, receiver_expr);
@@ -269,7 +287,7 @@ static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_A
 		break;
 
 	case LT_AST_NODE_IDENTIFIER:
-		add_reference(index, node->identifier.token, scope, class_node, 0, 0);
+		add_reference(index, node->identifier.token, node, scope, class_node, 0, 0);
 		break;
 
 	default:
@@ -286,13 +304,123 @@ void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis)
 	if (!analysis->parser.root) return;
 	lt_AstNode* root = analysis->parser.root;
 	walk_body(index, &root->chunk.body, root->chunk.scope, 0, 0, 0);
+	ltls_types_build(index, analysis);
 }
 
 void ltls_index_free(ltls_Index* index)
 {
+	for (uint32_t i = 0; i < index->allocation_count; i++) free(index->allocations[i]);
+	free(index->allocations);
+	free(index->node_types);
+	free(index->function_returns);
 	free(index->declarations);
 	free(index->references);
 	memset(index, 0, sizeof(ltls_Index));
+}
+
+static ltls_TypeSetNode* allocate_type(ltls_Index* index, uint8_t kind, lt_AstNode* node)
+{
+	ltls_TypeSetNode* item = malloc(sizeof(ltls_TypeSetNode));
+	if (!item) return 0;
+
+	item->kind = kind;
+	item->node = node;
+	item->next = 0;
+
+	ltls_TypeSetNode** allocations = realloc(index->allocations, sizeof(ltls_TypeSetNode*) * (index->allocation_count + 1));
+	if (!allocations)
+	{
+		free(item);
+		return 0;
+	}
+
+	index->allocations = allocations;
+	index->allocations[index->allocation_count++] = item;
+	return item;
+}
+
+static uint8_t type_has(ltls_TypeSet types, uint8_t kind, lt_AstNode* node)
+{
+	for (ltls_TypeSet item = types; item; item = item->next)
+		if (item->kind == kind && item->node == node) return 1;
+	return 0;
+}
+
+ltls_TypeSet ltls_type_add(ltls_Index* index, ltls_TypeSet types, uint8_t kind, lt_AstNode* node)
+{
+	if (type_has(types, kind, node)) return types;
+
+	ltls_TypeSetNode* item = allocate_type(index, kind, node);
+	if (!item) return types;
+
+	item->next = types;
+	return item;
+}
+
+ltls_TypeSet ltls_type_union(ltls_Index* index, ltls_TypeSet left, ltls_TypeSet right)
+{
+	ltls_TypeSet result = left;
+	for (ltls_TypeSet item = right; item; item = item->next)
+		result = ltls_type_add(index, result, item->kind, item->node);
+	return result;
+}
+
+uint8_t ltls_type_equals(ltls_TypeSet left, ltls_TypeSet right)
+{
+	for (ltls_TypeSet item = left; item; item = item->next)
+		if (!type_has(right, item->kind, item->node)) return 0;
+	for (ltls_TypeSet item = right; item; item = item->next)
+		if (!type_has(left, item->kind, item->node)) return 0;
+	return 1;
+}
+
+void ltls_index_set_type(ltls_Index* index, lt_AstNode* node, ltls_TypeSet types)
+{
+	for (uint32_t i = 0; i < index->node_type_count; i++)
+	{
+		if (index->node_types[i].node != node) continue;
+		index->node_types[i].types = types;
+		return;
+	}
+
+	ltls_TypedNode* items = realloc(index->node_types, sizeof(ltls_TypedNode) * (index->node_type_count + 1));
+	if (!items) return;
+	index->node_types = items;
+	index->node_types[index->node_type_count].node = node;
+	index->node_types[index->node_type_count].types = types;
+	index->node_type_count++;
+}
+
+ltls_TypeSet ltls_index_type_of(const ltls_Index* index, lt_AstNode* node)
+{
+	for (uint32_t i = 0; i < index->node_type_count; i++)
+		if (index->node_types[i].node == node) return index->node_types[i].types;
+	return 0;
+}
+
+ltls_TypeSet ltls_index_returns(const ltls_Index* index, lt_AstNode* node)
+{
+	for (uint32_t i = 0; i < index->function_return_count; i++)
+		if (index->function_returns[i].node == node) return index->function_returns[i].types;
+	return 0;
+}
+
+ltls_TypeSet ltls_index_add_return(ltls_Index* index, lt_AstNode* node, ltls_TypeSet types)
+{
+	for (uint32_t i = 0; i < index->function_return_count; i++)
+	{
+		if (index->function_returns[i].node != node) continue;
+		index->function_returns[i].types = ltls_type_union(index, index->function_returns[i].types, types);
+		return index->function_returns[i].types;
+	}
+
+	ltls_TypedNode* items = realloc(index->function_returns, sizeof(ltls_TypedNode) * (index->function_return_count + 1));
+	if (!items) return 0;
+	index->function_returns = items;
+	index->function_returns[index->function_return_count].node = node;
+	index->function_returns[index->function_return_count].types = types;
+	index->function_return_count++;
+	return types;
 }
 
 static uint8_t span_covers(lt_Span span, uint32_t offset)
@@ -367,43 +495,51 @@ static const ltls_Declaration* resolve_member(const ltls_Index* index, lt_AstNod
 	return 0;
 }
 
-/* `@name` resolves against the active receiver. When that receiver is a table
-   literal, or a local initialized with one, its keys are the members. */
-static const ltls_Declaration* resolve_receiver(const ltls_Index* index, lt_AstNode* expression, lt_Token* token, uint32_t depth)
+const ltls_Declaration* ltls_index_lookup(const ltls_Index* index, lt_Scope* scope, lt_Token* token)
 {
-	if (!expression || depth > 4) return 0;
+	const ltls_Declaration* declaration = resolve_lexical(index, scope, token);
+	if (declaration) return declaration;
+	return resolve_global(index, token);
+}
 
-	if (expression->type == LT_AST_NODE_TABLE)
+static const ltls_Declaration* resolve_table_field(const ltls_Index* index, lt_AstNode* table, lt_Token* token)
+{
+	for (uint32_t i = 0; i < index->declaration_count; i++)
 	{
-		for (uint32_t i = 0; i < index->declaration_count; i++)
-		{
-			const ltls_Declaration* declaration = &index->declarations[i];
-			if (declaration->kind == LTLS_DECL_FIELD && declaration->node == expression &&
-				declaration->name->idx == token->idx)
-				return declaration;
-		}
-		return 0;
+		const ltls_Declaration* declaration = &index->declarations[i];
+		if (declaration->kind == LTLS_DECL_FIELD && declaration->node == table && declaration->name->idx == token->idx)
+			return declaration;
 	}
+	return 0;
+}
 
-	if (expression->type == LT_AST_NODE_IDENTIFIER)
+const ltls_Declaration* ltls_index_member(const ltls_Index* index, lt_AstNode* class_node, lt_Token* token)
+{
+	return resolve_member(index, class_node, token);
+}
+
+const ltls_Declaration* ltls_index_table_field(const ltls_Index* index, lt_AstNode* table, lt_Token* token)
+{
+	return resolve_table_field(index, table, token);
+}
+
+/* `obj.name` and `@name` resolve through every alternative of the receiver's
+   type: class instances look up members, tables look up literal keys. */
+static const ltls_Declaration* resolve_receiver_types(const ltls_Index* index, ltls_TypeSet types, lt_Token* token)
+{
+	for (ltls_TypeSet type = types; type; type = type->next)
 	{
-		lt_Token* base = expression->identifier.token;
-		for (uint32_t i = 0; i < index->reference_count; i++)
+		if (type->kind == LTLS_TYPE_INSTANCE)
 		{
-			const ltls_Reference* reference = &index->references[i];
-			if (reference->token != base || reference->member) continue;
-
-			const ltls_Declaration* target = resolve_lexical(index, reference->scope, base);
-			if (!target) target = resolve_global(index, base);
-			if (!target) return 0;
-
-			/* Only a plain `var x = <expr>` initializer can be followed. */
-			if (target->node && target->node->type == LT_AST_NODE_DECLARE)
-				return resolve_receiver(index, target->node->declare.expr, token, depth + 1);
-			return 0;
+			const ltls_Declaration* declaration = resolve_member(index, type->node, token);
+			if (declaration) return declaration;
+		}
+		else if (type->kind == LTLS_TYPE_TABLE)
+		{
+			const ltls_Declaration* declaration = resolve_table_field(index, type->node, token);
+			if (declaration) return declaration;
 		}
 	}
-
 	return 0;
 }
 
@@ -423,13 +559,12 @@ const ltls_Declaration* ltls_index_resolve(const ltls_Index* index, uint32_t off
 		if (candidate->member)
 		{
 			if (candidate->receiver_expr)
-				return resolve_receiver(index, candidate->receiver_expr, candidate->token, 0);
+				return resolve_receiver_types(index, ltls_index_type_of(index, candidate->receiver_expr), candidate->token);
 			return resolve_member(index, candidate->class_node, candidate->token);
 		}
 
-		declaration = resolve_lexical(index, candidate->scope, candidate->token);
-		if (declaration) return declaration;
-		return resolve_global(index, candidate->token);
+		declaration = ltls_index_lookup(index, candidate->scope, candidate->token);
+		return declaration;
 	}
 
 	return 0;
@@ -494,7 +629,50 @@ static void append_arguments(ltls_String* string, const ltls_Index* index, lt_As
 	string_append(string, ")");
 }
 
-char* ltls_declaration_signature(const ltls_Index* index, const ltls_Declaration* declaration)
+static const char* type_node_name(const ltls_Index* index, lt_AstNode* node)
+{
+	if (!node) return "?";
+	if (node->type == LT_AST_NODE_CLASS) return token_text(index, node->class_decl.identifier);
+	return "?";
+}
+
+void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffer, size_t size)
+{
+	if (size == 0) return;
+	buffer[0] = 0;
+
+	if (!types)
+	{
+		snprintf(buffer, size, "unknown");
+		return;
+	}
+
+	size_t used = 0;
+	for (ltls_TypeSet type = types; type; type = type->next)
+	{
+		const char* name = "unknown";
+		switch (type->kind)
+		{
+		case LTLS_TYPE_NUMBER: name = "number"; break;
+		case LTLS_TYPE_STRING: name = "string"; break;
+		case LTLS_TYPE_BOOL: name = "bool"; break;
+		case LTLS_TYPE_NULL: name = "null"; break;
+		case LTLS_TYPE_TABLE: name = "table"; break;
+		case LTLS_TYPE_ARRAY: name = "array"; break;
+		case LTLS_TYPE_FUNCTION: name = "fn"; break;
+		case LTLS_TYPE_CLASS: name = type_node_name(index, type->node); break;
+		case LTLS_TYPE_INSTANCE: name = type_node_name(index, type->node); break;
+		default: name = "unknown"; break;
+		}
+
+		int written = snprintf(buffer + used, size - used, "%s%s", used ? " | " : "", name);
+		if (written < 0) break;
+		used += (size_t)written;
+		if (used >= size) break;
+	}
+}
+
+char* ltls_declaration_signature(const ltls_Index* index, const ltls_Declaration* declaration, ltls_TypeSet type_override)
 {
 	ltls_String string = { 0 };
 	string_append(&string, declaration->is_global ? "global " : "");
@@ -532,6 +710,18 @@ char* ltls_declaration_signature(const ltls_Index* index, const ltls_Declaration
 		string_append(&string, "var ");
 		string_append(&string, name);
 		break;
+	}
+
+	if (declaration->kind == LTLS_DECL_LOCAL || declaration->kind == LTLS_DECL_PARAM ||
+	    declaration->kind == LTLS_DECL_FIELD || declaration->kind == LTLS_DECL_GLOBAL)
+	{
+		char type_name[128];
+		ltls_type_describe(index, type_override ? type_override : declaration->types, type_name, sizeof(type_name));
+		if (strcmp(type_name, "unknown") != 0)
+		{
+			string_append(&string, ": ");
+			string_append(&string, type_name);
+		}
 	}
 
 	if (!string.text) string_append(&string, "");

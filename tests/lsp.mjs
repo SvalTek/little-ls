@@ -276,8 +276,63 @@ async function main() {
   const unknownHover = await waitFor((message) => message.id === 13, "unknown hover");
   assert.equal(unknownHover.result, null);
 
-  send({ jsonrpc: "2.0", id: 14, method: "shutdown" });
-  const shutdown = await waitFor((message) => message.id === 14, "shutdown");
+  const boxUri = "file:///test/box.little";
+  const boxSource = [
+    "class Box {",
+    "  value",
+    "  test() {",
+    "    return 1",
+    "  }",
+    "}",
+    "var p = Box()",
+    "io.print(p.value)",
+    "io.print(p:test())",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: boxUri, languageId: "little", version: 1, text: boxSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === boxUri, "box diagnostics");
+
+  send({ jsonrpc: "2.0", id: 15, method: "textDocument/hover", params: { textDocument: { uri: boxUri }, position: { line: 6, character: 4 } } });
+  const instanceHover = await waitFor((message) => message.id === 15, "instance hover");
+  assert.match(instanceHover.result.contents.value, /var p: Box/);
+
+  send({ jsonrpc: "2.0", id: 16, method: "textDocument/hover", params: { textDocument: { uri: boxUri }, position: { line: 7, character: 12 } } });
+  const fieldHover = await waitFor((message) => message.id === 16, "field hover");
+  assert.match(fieldHover.result.contents.value, /field value/);
+
+  send({ jsonrpc: "2.0", id: 17, method: "textDocument/hover", params: { textDocument: { uri: boxUri }, position: { line: 8, character: 12 } } });
+  const methodHover = await waitFor((message) => message.id === 17, "method hover");
+  assert.match(methodHover.result.contents.value, /fn test\(\)/);
+
+  send({ jsonrpc: "2.0", id: 18, method: "textDocument/definition", params: { textDocument: { uri: boxUri }, position: { line: 8, character: 12 } } });
+  const methodDefinition = await waitFor((message) => message.id === 18, "method definition");
+  assert.equal(methodDefinition.result.range.start.line, 2);
+  assert.equal(methodDefinition.result.range.start.character, 2);
+  assert.equal(methodDefinition.result.range.end.character, 6);
+
+  const flowUri = "file:///test/flow.little";
+  const flowSource = "var x = 1\nio.print(x)\nx = \"s\"\nio.print(x)\n";
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: flowUri, languageId: "little", version: 1, text: flowSource } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === flowUri, "flow diagnostics");
+
+  send({ jsonrpc: "2.0", id: 19, method: "textDocument/hover", params: { textDocument: { uri: flowUri }, position: { line: 1, character: 9 } } });
+  const numberHover = await waitFor((message) => message.id === 19, "number hover");
+  assert.match(numberHover.result.contents.value, /var x: number/);
+
+  send({ jsonrpc: "2.0", id: 20, method: "textDocument/hover", params: { textDocument: { uri: flowUri }, position: { line: 3, character: 9 } } });
+  const stringHover = await waitFor((message) => message.id === 20, "string hover");
+  assert.match(stringHover.result.contents.value, /var x: string/);
+
+  send({ jsonrpc: "2.0", id: 21, method: "shutdown" });
+  const shutdown = await waitFor((message) => message.id === 21, "shutdown");
   assert.equal(shutdown.result, null);
 
   send({ jsonrpc: "2.0", method: "exit" });

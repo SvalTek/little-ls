@@ -596,12 +596,14 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 	if (!state.vm) return 0;
 
 	uint32_t offset = position_to_offset(&state.lines, position->document->text, position->line, position->character);
-	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, 0);
+	const ltls_Reference* reference = 0;
+	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, &reference);
 
 	yyjson_mut_val* result = 0;
 	if (declaration)
 	{
-		char* signature = ltls_declaration_signature(&state.index, declaration);
+		ltls_TypeSet override = (reference && !reference->member) ? reference->types : 0;
+		char* signature = ltls_declaration_signature(&state.index, declaration, override);
 		ltls_Doc docs;
 		uint8_t has_docs = declaration->name->line > 0 &&
 			ltls_doc_for_line(&state.analysis.tokens, declaration->name->line, &docs);
