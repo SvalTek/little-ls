@@ -2,6 +2,9 @@
 // Run with: node tests/lsp.mjs <path-to-little-ls>
 import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const executable = process.argv[2];
 if (!executable) {
@@ -1013,6 +1016,63 @@ async function main() {
   assert.match((await multiHover(111, 14, 5)).result.contents.value, /var t: string/);
   assert.match((await multiHover(112, 16, 7)).result.contents.value, /var name: string/);
   assert.match((await multiHover(113, 16, 13)).result.contents.value, /var count: number/);
+
+  const importDir = mkdtempSync(path.join(tmpdir(), "little-ls-"));
+  writeFileSync(path.join(importDir, "mod.little"), [
+    "fn greet(name) {",
+    "  return \"hi\"",
+    "}",
+    "class Thing {",
+    "  value",
+    "}",
+    "return {",
+    "  greet: greet",
+    "  Thing: Thing",
+    "  answer: 42",
+    "  tags: [\"a\", \"b\"]",
+    "}",
+    "",
+  ].join("\n"));
+  const importMainText = [
+    "import { greet, Thing, answer, tags } from \"mod\"",
+    "var t = Thing()",
+    "var g = greet(\"x\")",
+    "var first = tags[0]",
+    "var m = import \"mod\"",
+    "io.print(m.answer)",
+    "io.print(t.value)",
+    "",
+  ].join("\n");
+  writeFileSync(path.join(importDir, "main.little"), importMainText);
+
+  const importRoot = importDir.split(path.sep).join("/");
+  const importMainUri = "file:///" + importRoot + "/main.little";
+
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: importMainUri, languageId: "little", version: 1, text: importMainText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === importMainUri, "module diagnostics");
+
+  async function importHover(id, line, character) {
+    send({ jsonrpc: "2.0", id, method: "textDocument/hover", params: { textDocument: { uri: importMainUri }, position: { line, character } } });
+    return waitFor((message) => message.id === id, "module hover " + line);
+  }
+
+  assert.match((await importHover(114, 1, 4)).result.contents.value, /var t: Thing/);
+  assert.match((await importHover(115, 2, 4)).result.contents.value, /var g: string/);
+  assert.match((await importHover(116, 3, 4)).result.contents.value, /var first: string/);
+  assert.match((await importHover(117, 5, 14)).result.contents.value, /field answer: number/);
+
+  send({ jsonrpc: "2.0", id: 118, method: "textDocument/completion", params: { textDocument: { uri: importMainUri }, position: { line: 5, character: 11 } } });
+  const importCompletion = await waitFor((message) => message.id === 118, "module completion");
+  assert.deepEqual(importCompletion.result.items.map((item) => item.label).sort(), ["Thing", "answer", "greet", "tags"]);
+
+  send({ jsonrpc: "2.0", id: 119, method: "textDocument/definition", params: { textDocument: { uri: importMainUri }, position: { line: 5, character: 14 } } });
+  const importDefinition = await waitFor((message) => message.id === 119, "module definition");
+  assert.ok(importDefinition.result.uri.endsWith("/mod.little"), "definition should target the module");
+  assert.equal(importDefinition.result.range.start.line, 9);
 
   send({ jsonrpc: "2.0", id: 69, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 14 } } });
   const tableThisTarget = await waitFor((message) => message.id === 69, "table this target hover");

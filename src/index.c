@@ -60,6 +60,11 @@ static void add_declaration(ltls_Index* index, lt_Token* name, lt_Span span, lt_
 	declaration.returns_text = 0;
 	declaration.detail = 0;
 	declaration.signature = 0;
+	declaration.signature_owned = 0;
+	declaration.origin_uri = 0;
+	declaration.origin_line = 0;
+	declaration.origin_col = 0;
+	declaration.origin_length = 0;
 	declaration.kind = kind;
 	declaration.is_global = is_global;
 	declaration.from_doc = 0;
@@ -766,6 +771,7 @@ void ltls_index_build(ltls_Index* index, const lt_Analysis* analysis)
 	walk_body(index, &root->chunk.body, root->chunk.scope, 0, 0, 0);
 	build_doc_shapes(index);
 	seed_std_symbols(index);
+	ltls_index_preload_imports(index);
 	ltls_types_build(index, analysis);
 }
 
@@ -779,6 +785,8 @@ void ltls_index_free(ltls_Index* index)
 		if (index->declarations[i].external) continue;
 		free(index->declarations[i].annotation);
 		free(index->declarations[i].detail);
+		free(index->declarations[i].signature_owned);
+		free(index->declarations[i].origin_uri);
 	}
 	for (uint32_t i = 0; i < index->token_text_count; i++) free(index->token_texts[i].text);
 	free(index->token_texts);
@@ -786,6 +794,8 @@ void ltls_index_free(ltls_Index* index)
 	free(index->shapes);
 	for (uint32_t i = 0; i < index->tuple_count; i++) free(index->tuples[i].items);
 	free(index->tuples);
+	for (uint32_t i = 0; i < index->import_count; i++) free(index->imports[i].key);
+	free(index->imports);
 	for (uint32_t i = 0; i < index->token_allocation_count; i++) free(index->token_allocations[i]);
 	free(index->token_allocations);
 	for (uint32_t i = 0; i < index->node_allocation_count; i++) free(index->node_allocations[i]);
@@ -1522,6 +1532,283 @@ void ltls_index_set_tuple(ltls_Index* index, lt_AstNode* node, ltls_TypeSet elem
 	}
 
 	ltls_index_add_return(index, node, tuple_first(index, tuple));
+}
+
+typedef struct {
+	ltls_Index* target;
+	const ltls_Index* source;
+	const lt_Analysis* source_analysis;
+	const char* origin_uri;
+	struct {
+		lt_AstNode* from;
+		lt_AstNode* to;
+	} nodes[128];
+	uint32_t node_count;
+} ltls_Clone;
+
+static lt_AstNode* clone_node(ltls_Clone* clone, lt_AstNode* source, lt_AstNodeType type);
+static ltls_TypeSet clone_types(ltls_Clone* clone, ltls_TypeSet types);
+
+static lt_AstNode* clone_mapped(ltls_Clone* clone, lt_AstNode* source)
+{
+	for (uint32_t i = 0; i < clone->node_count; i++)
+		if (clone->nodes[i].from == source) return clone->nodes[i].to;
+	return 0;
+}
+
+static void clone_map(ltls_Clone* clone, lt_AstNode* source, lt_AstNode* target)
+{
+	if (!source || clone->node_count >= sizeof(clone->nodes) / sizeof(clone->nodes[0])) return;
+	clone->nodes[clone->node_count].from = source;
+	clone->nodes[clone->node_count].to = target;
+	clone->node_count++;
+}
+
+static void append_text(char** text, size_t* length, size_t* capacity, const char* value)
+{
+	if (!value) return;
+
+	size_t size = strlen(value);
+	if (*length + size + 1 > *capacity)
+	{
+		size_t grown = *capacity ? *capacity : 64;
+		while (grown < *length + size + 1) grown *= 2;
+		char* items = realloc(*text, grown);
+		if (!items) return;
+		*text = items;
+		*capacity = grown;
+	}
+
+	memcpy(*text + *length, value, size + 1);
+	*length += size;
+}
+
+/* Copies a declaration's docs into plain detail text for hover. */
+static char* clone_docs(ltls_Clone* clone, uint16_t line)
+{
+	if (!clone->source_analysis || !line) return 0;
+
+	ltls_Doc doc;
+	if (!ltls_doc_for_line(&clone->source_analysis->tokens, line, &doc)) return 0;
+
+	char* text = 0;
+	size_t length = 0, capacity = 0;
+
+	if (doc.description && doc.description[0]) append_text(&text, &length, &capacity, doc.description);
+	for (uint32_t i = 0; i < doc.param_count; i++)
+	{
+		if (!doc.params[i].description || !doc.params[i].description[0]) continue;
+		append_text(&text, &length, &capacity, "\n- ");
+		append_text(&text, &length, &capacity, doc.params[i].name);
+		append_text(&text, &length, &capacity, ": ");
+		append_text(&text, &length, &capacity, doc.params[i].description);
+	}
+
+	ltls_doc_free(&doc);
+	return text;
+}
+
+static lt_Token* clone_name_token(ltls_Clone* clone, const lt_Token* source)
+{
+	const char* text = ltls_index_token_text(clone->source, source);
+	return text ? synthetic_token(clone->target, (lt_Span){ 0, 0 }, 0, 0, text) : 0;
+}
+
+static void clone_declaration(ltls_Clone* clone, const ltls_Declaration* declaration, lt_AstNode* owner)
+{
+	lt_Token* name = clone_name_token(clone, declaration->name);
+	if (!name) return;
+
+	add_declaration(clone->target, name, name->span, 0, owner, 0, declaration->kind, declaration->is_global);
+	ltls_Declaration* copy = &clone->target->declarations[clone->target->declaration_count - 1];
+	copy->types = clone_types(clone, declaration->types);
+	copy->from_doc = declaration->from_doc;
+	copy->origin_uri = declaration->origin_uri ? copy_text(declaration->origin_uri) : copy_text(clone->origin_uri);
+	copy->origin_line = declaration->origin_uri ? declaration->origin_line : declaration->name->line;
+	copy->origin_col = declaration->origin_uri ? declaration->origin_col : declaration->name->col;
+	copy->origin_length = declaration->origin_uri ? declaration->origin_length
+		: (uint16_t)(declaration->name->span.end - declaration->name->span.start);
+
+	char* signature = ltls_declaration_signature(clone->source, declaration, 0);
+	if (signature)
+	{
+		copy->signature_owned = signature;
+		copy->signature = signature;
+	}
+
+	copy->detail = declaration->detail ? copy_text(declaration->detail)
+		: clone_docs(clone, declaration->name->line);
+}
+
+static lt_AstNode* clone_function(ltls_Clone* clone, lt_AstNode* source)
+{
+	lt_AstNode* existing = clone_mapped(clone, source);
+	if (existing) return existing;
+
+	lt_AstNode* fn = synthetic_node(clone->target, LT_AST_NODE_FN);
+	if (!fn) return 0;
+	clone_map(clone, source, fn);
+
+	ltls_TypeSet returns = clone_types(clone, ltls_index_returns(clone->source, source));
+	if (returns) ltls_index_add_return(clone->target, fn, returns);
+
+	const ltls_Tuple* tuple = ltls_index_tuple(clone->source, source);
+	if (tuple)
+	{
+		ltls_TypeSet items[16];
+		uint32_t count = tuple->count < 16 ? tuple->count : 0;
+		if (tuple->known)
+			for (uint32_t i = 0; i < count; i++) items[i] = clone_types(clone, tuple->items[i]);
+		ltls_index_set_tuple(clone->target, fn, clone_types(clone, tuple->element), items, count,
+			tuple->known && tuple->count <= 16);
+	}
+
+	return fn;
+}
+
+static lt_AstNode* clone_class(ltls_Clone* clone, lt_AstNode* source)
+{
+	lt_AstNode* existing = clone_mapped(clone, source);
+	if (existing) return existing;
+
+	lt_AstNode* klass = synthetic_node(clone->target, LT_AST_NODE_CLASS);
+	if (!klass) return 0;
+	clone_map(clone, source, klass);
+
+	klass->class_decl.identifier = clone_name_token(clone, source->class_decl.identifier);
+	if (!klass->class_decl.identifier) return klass;
+
+	add_declaration(clone->target, klass->class_decl.identifier, klass->class_decl.identifier->span, 0,
+		klass, 0, LTLS_DECL_CLASS, 0);
+	ltls_Declaration* declaration = &clone->target->declarations[clone->target->declaration_count - 1];
+	declaration->origin_uri = copy_text(clone->origin_uri);
+	declaration->origin_line = source->class_decl.identifier->line;
+	declaration->origin_col = source->class_decl.identifier->col;
+	declaration->origin_length =
+		(uint16_t)(source->class_decl.identifier->span.end - source->class_decl.identifier->span.start);
+
+	if (source->class_decl.superclass)
+	{
+		const char* base = ltls_index_token_text(clone->source, source->class_decl.superclass);
+		if (base)
+		{
+			for (uint32_t i = 0; i < clone->source->declaration_count; i++)
+			{
+				const ltls_Declaration* candidate = &clone->source->declarations[i];
+				if (candidate->kind != LTLS_DECL_CLASS || !candidate->node) continue;
+				const char* name = ltls_index_token_text(clone->source, candidate->name);
+				if (!name || strcmp(name, base) != 0) continue;
+				clone_class(clone, candidate->node);
+				break;
+			}
+			klass->class_decl.superclass = synthetic_token(clone->target, (lt_Span){ 0, 0 }, 0, 0, base);
+		}
+	}
+
+	for (uint32_t i = 0; i < clone->source->declaration_count; i++)
+	{
+		const ltls_Declaration* member = &clone->source->declarations[i];
+		if (member->node != source) continue;
+		if (member->kind < LTLS_DECL_FIELD || member->kind > LTLS_DECL_PROPERTY) continue;
+		clone_declaration(clone, member, klass);
+	}
+
+	return klass;
+}
+
+static lt_AstNode* clone_table(ltls_Clone* clone, lt_AstNode* source)
+{
+	lt_AstNode* existing = clone_mapped(clone, source);
+	if (existing) return existing;
+
+	lt_AstNode* table = synthetic_node(clone->target, LT_AST_NODE_TABLE);
+	if (!table) return 0;
+	clone_map(clone, source, table);
+
+	for (uint32_t i = 0; i < clone->source->declaration_count; i++)
+	{
+		const ltls_Declaration* field = &clone->source->declarations[i];
+		if (field->node != source) continue;
+		if (field->kind != LTLS_DECL_FIELD) continue;
+		clone_declaration(clone, field, table);
+	}
+
+	return table;
+}
+
+static lt_AstNode* clone_source_node(ltls_Clone* clone, lt_AstNode* source, lt_AstNodeType type)
+{
+	if (type == LT_AST_NODE_CLASS) return clone_class(clone, source);
+	if (type == LT_AST_NODE_TABLE) return clone_table(clone, source);
+	if (type == LT_AST_NODE_FN) return clone_function(clone, source);
+	return 0;
+}
+
+static ltls_TypeSet clone_types(ltls_Clone* clone, ltls_TypeSet types)
+{
+	ltls_TypeSet result = 0;
+	for (ltls_TypeSet type = types; type; type = type->next)
+	{
+		switch (type->kind)
+		{
+		case LTLS_TYPE_TABLE:
+		case LTLS_TYPE_CLASS:
+		case LTLS_TYPE_INSTANCE:
+		case LTLS_TYPE_FUNCTION: {
+			lt_AstNodeType node_type = type->kind == LTLS_TYPE_TABLE ? LT_AST_NODE_TABLE
+				: type->kind == LTLS_TYPE_FUNCTION ? LT_AST_NODE_FN : LT_AST_NODE_CLASS;
+			lt_AstNode* node = clone_source_node(clone, type->node, node_type);
+			result = ltls_type_add(clone->target, result,
+				type->kind == LTLS_TYPE_INSTANCE ? LTLS_TYPE_INSTANCE
+				: type->kind == LTLS_TYPE_CLASS ? LTLS_TYPE_CLASS
+				: type->kind == LTLS_TYPE_TABLE ? LTLS_TYPE_TABLE : LTLS_TYPE_FUNCTION, node);
+		} break;
+
+		case LTLS_TYPE_ARRAY: {
+			ltls_TypeSet element = clone_types(clone,
+				ltls_index_array_element(clone->source, type->node));
+			result = ltls_type_union(clone->target, result, ltls_type_array(clone->target, element));
+		} break;
+
+		default:
+			result = ltls_type_add(clone->target, result, type->kind, 0);
+			break;
+		}
+	}
+	return result;
+}
+
+ltls_TypeSet ltls_index_clone_export(ltls_Index* index, const ltls_Index* source,
+                                     const lt_Analysis* source_analysis, const char* origin_uri)
+{
+	if (!source_analysis || !source_analysis->parser.root) return 0;
+
+	lt_AstNode* expression = 0;
+	lt_Buffer* body = &source_analysis->parser.root->chunk.body;
+	for (uint32_t i = 0; i < body->length; i++)
+	{
+		lt_AstNode* node = *AT(lt_AstNode*, *body, i);
+		if (node->type == LT_AST_NODE_RETURN)
+		{
+			expression = node->ret.expr;
+			break;
+		}
+	}
+
+	if (!expression)
+		return ltls_type_add(index, 0, LTLS_TYPE_BOOL, 0);
+
+	ltls_TypeSet exported = ltls_index_type_of(source, expression);
+	if (!exported) return 0;
+
+	ltls_Clone clone;
+	memset(&clone, 0, sizeof(clone));
+	clone.target = index;
+	clone.source = source;
+	clone.source_analysis = source_analysis;
+	clone.origin_uri = origin_uri;
+
+	return clone_types(&clone, exported);
 }
 
 void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffer, size_t size)

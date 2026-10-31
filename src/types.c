@@ -15,6 +15,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #define AT(type, buffer, index) \
 	((type*)((char*)(buffer).data + (buffer).element_size * (index)))
@@ -286,6 +287,22 @@ static uint8_t declaration_is_unpack(const ltls_Declaration* declaration)
 	       strncmp(declaration->signature, "fn unpack(", 10) == 0;
 }
 
+static char* literal_string(ltls_Context* context, lt_AstNode* node)
+{
+	if (!node || node->type != LT_AST_NODE_LITERAL || !node->literal.token) return 0;
+	lt_Token* token = node->literal.token;
+	if (token->type != LT_TOKEN_STRING_LITERAL) return 0;
+	if (token->idx >= context->index->tokens->literal_buffer.length) return 0;
+
+	lt_Literal* literal = AT(lt_Literal, context->index->tokens->literal_buffer, token->idx);
+	if (!literal->string) return 0;
+
+	size_t length = strlen(literal->string);
+	char* copy = malloc(length + 1);
+	if (copy) memcpy(copy, literal->string, length + 1);
+	return copy;
+}
+
 static ltls_TypeSet array_element_types(ltls_Context* context, ltls_TypeSet types)
 {
 	ltls_TypeSet element = 0;
@@ -422,6 +439,21 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 	for (uint8_t i = 1; i <= LT_MAX_CALL_ARGS + 1; i++)
 		analyze_expression(context, node->call.args[i]);
 
+	/* The parser builds an import expression with a synthetic callee, so it is
+	   recognized by name rather than through the reference table. */
+	lt_Token* import_token = callee_token(node->call.callee);
+	const char* import_name = import_token ? ltls_index_token_text(context->index, import_token) : 0;
+	if (import_name && strcmp(import_name, "import") == 0)
+	{
+		char* specifier = literal_string(context, node->call.args[0]);
+		if (specifier)
+		{
+			ltls_TypeSet imported = ltls_import_cached(context->index, specifier);
+			free(specifier);
+			if (imported) return imported;
+		}
+	}
+
 	ltls_TypeSet result = 0;
 	for (ltls_TypeSet type = callee; type; type = type->next)
 	{
@@ -453,6 +485,18 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 			? (count ? items[0] : ltls_type_add(context->index, 0, LTLS_TYPE_NULL, 0))
 			: element;
 		return result;
+	}
+
+	if (declaration && declaration->external && declaration->signature &&
+	    strncmp(declaration->signature, "fn import(", 10) == 0)
+	{
+		char* specifier = literal_string(context, node->call.args[0]);
+		if (specifier)
+		{
+			ltls_TypeSet imported = ltls_import_cached(context->index, specifier);
+			free(specifier);
+			if (imported) return imported;
+		}
 	}
 
 	if (declaration && declaration->external && declaration->signature &&

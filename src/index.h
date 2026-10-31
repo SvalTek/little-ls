@@ -50,6 +50,10 @@ typedef struct {
 	const char* returns_text; /* return type text for standard library functions */
 	char* detail;       /* doc description for synthetic members */
 	const char* signature; /* display signature override (std symbols) */
+	char* signature_owned; /* cloned signatures are owned */
+	char* origin_uri;   /* file a cloned declaration came from */
+	uint16_t origin_line, origin_col;
+	uint16_t origin_length;
 	uint8_t kind;
 	uint8_t is_global;
 	uint8_t from_doc;
@@ -82,6 +86,11 @@ typedef struct {
 } ltls_Shape;
 
 typedef struct {
+	char* key;
+	ltls_TypeSet value;
+} ltls_ImportEntry;
+
+typedef struct {
 	lt_AstNode* node;
 	uint8_t known;        /* arity and per-position types are exact */
 	uint32_t count;
@@ -110,6 +119,10 @@ typedef struct {
 	/* function node -> return stream from `unpack(...)` or a forwarded call */
 	ltls_Tuple* tuples;
 	uint32_t tuple_count;
+
+	/* resolved module path -> exported value type */
+	ltls_ImportEntry* imports;
+	uint32_t import_count;
 
 	/* text for synthetic tokens created from doc shapes */
 	ltls_TokenText* token_texts;
@@ -188,6 +201,16 @@ const ltls_Tuple* ltls_index_tuple(const ltls_Index* index, lt_AstNode* node);
 
 /* The FN node for a declaration, when it declares one. */
 lt_AstNode* ltls_index_function_node(const ltls_Declaration* declaration);
+
+/* Clones the exported value of an analysed module into this index. */
+ltls_TypeSet ltls_index_clone_export(ltls_Index* index, const ltls_Index* source,
+                                     const lt_Analysis* source_analysis, const char* origin_uri);
+
+/* Loads a module and clones its exported value into this index. */
+ltls_TypeSet ltls_import_value(ltls_Index* index, const char* specifier);
+ltls_TypeSet ltls_import_cached(const ltls_Index* index, const char* specifier);
+void ltls_index_preload_imports(ltls_Index* index);
+void ltls_imports_configure(const char* workspace_root_uri);
 
 /* Renders a type set such as `LLMProvider` or `number | string`. */
 void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffer, size_t size);

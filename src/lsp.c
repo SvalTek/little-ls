@@ -695,7 +695,8 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 		yyjson_mut_obj_add_strcpy(document, contents, "value", markdown.text);
 		yyjson_mut_obj_add_val(document, result, "contents", contents);
 
-		lt_Span highlight = (declaration->external && reference) ? reference->token->span : declaration->name->span;
+		lt_Span highlight = (reference && (declaration->external || declaration->origin_uri))
+			? reference->token->span : declaration->name->span;
 		yyjson_mut_obj_add_val(document, result, "range",
 			range_object(document, &state.lines, position->document->text, highlight));
 
@@ -721,12 +722,35 @@ static yyjson_mut_val* build_definition(yyjson_mut_doc* document, void* context)
 	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, 0);
 
 	yyjson_mut_val* result = 0;
-	if (declaration && !declaration->external && !(declaration->name->flags & LT_TOKEN_SYNTHETIC))
+	if (declaration && !declaration->external)
 	{
-		result = yyjson_mut_obj(document);
-		yyjson_mut_obj_add_strcpy(document, result, "uri", position->document->uri);
-		yyjson_mut_obj_add_val(document, result, "range",
-			range_object(document, &state.lines, position->document->text, declaration->name->span));
+		if (declaration->origin_uri)
+		{
+			uint32_t line = declaration->origin_line ? declaration->origin_line - 1 : 0;
+			uint32_t character = declaration->origin_col;
+			uint32_t end = character + declaration->origin_length;
+
+			yyjson_mut_val* start = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_int(document, start, "line", line);
+			yyjson_mut_obj_add_int(document, start, "character", character);
+			yyjson_mut_val* stop = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_int(document, stop, "line", line);
+			yyjson_mut_obj_add_int(document, stop, "character", end);
+			yyjson_mut_val* range = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_val(document, range, "start", start);
+			yyjson_mut_obj_add_val(document, range, "end", stop);
+
+			result = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_strcpy(document, result, "uri", declaration->origin_uri);
+			yyjson_mut_obj_add_val(document, result, "range", range);
+		}
+		else if (!(declaration->name->flags & LT_TOKEN_SYNTHETIC))
+		{
+			result = yyjson_mut_obj(document);
+			yyjson_mut_obj_add_strcpy(document, result, "uri", position->document->uri);
+			yyjson_mut_obj_add_val(document, result, "range",
+				range_object(document, &state.lines, position->document->text, declaration->name->span));
+		}
 	}
 
 	analysis_state_close(&state);
@@ -737,9 +761,20 @@ static yyjson_mut_val* build_definition(yyjson_mut_doc* document, void* context)
    Requests
    ------------------------------------------------------------------------- */
 
+static const char* object_string(yyjson_val* object, const char* key);
+
 static yyjson_mut_val* build_initialize(yyjson_mut_doc* document, void* context)
 {
-	(void)context;
+	yyjson_val* params = context;
+	const char* root = params ? object_string(params, "rootUri") : 0;
+	if (!root && params) root = object_string(params, "rootPath");
+	if (params)
+	{
+		yyjson_val* folders = yyjson_obj_get(params, "workspaceFolders");
+		yyjson_val* first = folders ? yyjson_arr_get(folders, 0) : 0;
+		if (!root) root = object_string(first, "uri");
+	}
+	ltls_imports_configure(root);
 
 	yyjson_mut_val* result = yyjson_mut_obj(document);
 
@@ -1601,7 +1636,7 @@ static void handle_message(ltls_Documents* documents, char* body, size_t length,
 
 	if (strcmp(method, "initialize") == 0)
 	{
-		if (id) send_message(id, build_initialize, 0);
+		if (id) send_message(id, build_initialize, params);
 	}
 	else if (strcmp(method, "shutdown") == 0)
 	{
