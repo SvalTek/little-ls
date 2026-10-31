@@ -699,6 +699,17 @@ static void build_doc_shapes(ltls_Index* index)
 			add_declaration(index, name, doc.class_span, 0, klass, 0, LTLS_DECL_CLASS, 0);
 		}
 
+		if (doc.class_generic_count)
+		{
+			ltls_index_set_generics(index, klass, doc.class_generics, doc.class_generic_count);
+			for (uint32_t m = 0; m < klass->class_decl.members.length; m++)
+			{
+				lt_ClassMember* member = AT(lt_ClassMember, klass->class_decl.members, m);
+				if (member->value && member->value->type == LT_AST_NODE_FN)
+					ltls_index_set_generics(index, member->value, doc.class_generics, doc.class_generic_count);
+			}
+		}
+
 		for (uint32_t f = 0; f < doc.field_count; f++)
 		{
 			ltls_DocField* field = &doc.fields[f];
@@ -796,6 +807,12 @@ void ltls_index_free(ltls_Index* index)
 	free(index->tuples);
 	for (uint32_t i = 0; i < index->import_count; i++) free(index->imports[i].key);
 	free(index->imports);
+	for (uint32_t i = 0; i < index->param_name_count; i++) free(index->param_names[i]);
+	free(index->param_names);
+	for (uint32_t i = 0; i < index->generic_count; i++) { for (uint32_t j = 0; j < index->generics[i].count; j++) free(index->generics[i].names[j]); free(index->generics[i].names); }
+	free(index->generics);
+	for (uint32_t i = 0; i < index->type_args_count; i++) free(index->type_args[i].args);
+	free(index->type_args);
 	for (uint32_t i = 0; i < index->token_allocation_count; i++) free(index->token_allocations[i]);
 	free(index->token_allocations);
 	for (uint32_t i = 0; i < index->node_allocation_count; i++) free(index->node_allocations[i]);
@@ -815,6 +832,7 @@ static ltls_TypeSetNode* allocate_type(ltls_Index* index, uint8_t kind, lt_AstNo
 
 	item->kind = kind;
 	item->node = node;
+	item->name = 0;
 	item->next = 0;
 
 	ltls_TypeSetNode** allocations = realloc(index->allocations, sizeof(ltls_TypeSetNode*) * (index->allocation_count + 1));
@@ -829,38 +847,74 @@ static ltls_TypeSetNode* allocate_type(ltls_Index* index, uint8_t kind, lt_AstNo
 	return item;
 }
 
-static uint8_t type_has(ltls_TypeSet types, uint8_t kind, lt_AstNode* node)
+static uint8_t type_has(ltls_TypeSet types, uint8_t kind, lt_AstNode* node, const char* name)
 {
 	for (ltls_TypeSet item = types; item; item = item->next)
-		if (item->kind == kind && item->node == node) return 1;
+	{
+		if (item->kind != kind) continue;
+		if (kind == LTLS_TYPE_PARAM)
+		{
+			if (item->name && name && strcmp(item->name, name) == 0) return 1;
+			continue;
+		}
+		if (item->node == node) return 1;
+	}
 	return 0;
+}
+
+static const char* intern_param_name(ltls_Index* index, const char* name)
+{
+	for (uint32_t i = 0; i < index->param_name_count; i++)
+		if (strcmp(index->param_names[i], name) == 0) return index->param_names[i];
+
+	char** names = realloc(index->param_names, sizeof(char*) * (index->param_name_count + 1));
+	if (!names) return 0;
+	size_t length = strlen(name);
+	char* copy = malloc(length + 1);
+	if (!copy) return 0;
+	memcpy(copy, name, length + 1);
+
+	index->param_names = names;
+	index->param_names[index->param_name_count++] = copy;
+	return copy;
+}
+
+static ltls_TypeSet add_type(ltls_Index* index, ltls_TypeSet types, uint8_t kind, lt_AstNode* node, const char* name)
+{
+	if (type_has(types, kind, node, name)) return types;
+
+	ltls_TypeSetNode* item = allocate_type(index, kind, node);
+	if (!item) return types;
+	if (kind == LTLS_TYPE_PARAM) item->name = intern_param_name(index, name ? name : "?");
+
+	item->next = types;
+	return item;
 }
 
 ltls_TypeSet ltls_type_add(ltls_Index* index, ltls_TypeSet types, uint8_t kind, lt_AstNode* node)
 {
-	if (type_has(types, kind, node)) return types;
+	return add_type(index, types, kind, node, 0);
+}
 
-	ltls_TypeSetNode* item = allocate_type(index, kind, node);
-	if (!item) return types;
-
-	item->next = types;
-	return item;
+ltls_TypeSet ltls_type_param(ltls_Index* index, const char* name)
+{
+	return add_type(index, 0, LTLS_TYPE_PARAM, 0, name);
 }
 
 ltls_TypeSet ltls_type_union(ltls_Index* index, ltls_TypeSet left, ltls_TypeSet right)
 {
 	ltls_TypeSet result = left;
 	for (ltls_TypeSet item = right; item; item = item->next)
-		result = ltls_type_add(index, result, item->kind, item->node);
+		result = add_type(index, result, item->kind, item->node, item->name);
 	return result;
 }
 
 uint8_t ltls_type_equals(ltls_TypeSet left, ltls_TypeSet right)
 {
 	for (ltls_TypeSet item = left; item; item = item->next)
-		if (!type_has(right, item->kind, item->node)) return 0;
+		if (!type_has(right, item->kind, item->node, item->name)) return 0;
 	for (ltls_TypeSet item = right; item; item = item->next)
-		if (!type_has(left, item->kind, item->node)) return 0;
+		if (!type_has(left, item->kind, item->node, item->name)) return 0;
 	return 1;
 }
 
@@ -1077,6 +1131,7 @@ uint32_t ltls_index_members(const ltls_Index* index, lt_AstNode* class_node,
                             const ltls_Declaration** out, uint32_t max)
 {
 	uint32_t count = 0;
+	class_node = ltls_index_class_base(index, class_node);
 	for (uint8_t depth = 0; class_node && depth < 8; depth++)
 	{
 		for (uint32_t i = 0; i < index->declaration_count; i++)
@@ -1293,7 +1348,7 @@ static const ltls_Declaration* resolve_receiver_types(const ltls_Index* index, l
 	{
 		if (type->kind == LTLS_TYPE_INSTANCE)
 		{
-			const ltls_Declaration* declaration = resolve_member(index, type->node, token);
+			const ltls_Declaration* declaration = resolve_member(index, ltls_index_class_base(index, type->node), token);
 			if (declaration) return declaration;
 		}
 		else if (type->kind == LTLS_TYPE_TABLE)
@@ -1811,6 +1866,255 @@ ltls_TypeSet ltls_index_clone_export(ltls_Index* index, const ltls_Index* source
 	return clone_types(&clone, exported);
 }
 
+static const ltls_Generics* find_generics(const ltls_Index* index, const lt_AstNode* node)
+{
+	for (uint32_t i = 0; i < index->generic_count; i++)
+		if (index->generics[i].node == node) return &index->generics[i];
+	return 0;
+}
+
+void ltls_index_set_generics(ltls_Index* index, lt_AstNode* node, char** names, uint32_t count)
+{
+	if (!node || !names || !count) return;
+	if (find_generics(index, node)) return;
+
+	ltls_Generics* items = realloc(index->generics, sizeof(ltls_Generics) * (index->generic_count + 1));
+	if (!items) return;
+
+	char** copies = malloc(sizeof(char*) * count);
+	if (!copies) return;
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		size_t length = strlen(names[i]);
+		copies[i] = malloc(length + 1);
+		if (!copies[i])
+		{
+			for (uint32_t j = 0; j < i; j++) free(copies[j]);
+			free(copies);
+			return;
+		}
+		memcpy(copies[i], names[i], length + 1);
+	}
+
+	index->generics = items;
+	index->generics[index->generic_count].node = node;
+	index->generics[index->generic_count].names = copies;
+	index->generics[index->generic_count].count = count;
+	index->generic_count++;
+}
+
+const char* const* ltls_index_generics(const ltls_Index* index, const lt_AstNode* node, uint32_t* count)
+{
+	const ltls_Generics* generics = find_generics(index, node);
+	if (!generics)
+	{
+		if (count) *count = 0;
+		return 0;
+	}
+	if (count) *count = generics->count;
+	return (const char* const*)generics->names;
+}
+
+lt_AstNode* ltls_index_class_base(const ltls_Index* index, lt_AstNode* class_node)
+{
+	for (uint32_t i = 0; i < index->type_args_count; i++)
+		if (index->type_args[i].marker == class_node) return index->type_args[i].base;
+	return class_node;
+}
+
+static const ltls_TypeArgs* find_type_args(const ltls_Index* index, const lt_AstNode* marker)
+{
+	for (uint32_t i = 0; i < index->type_args_count; i++)
+		if (index->type_args[i].marker == marker) return &index->type_args[i];
+	return 0;
+}
+
+const ltls_TypeSet* ltls_index_type_args(const ltls_Index* index, const ltls_TypeSetNode* node, uint32_t* count)
+{
+	if (!node)
+	{
+		if (count) *count = 0;
+		return 0;
+	}
+
+	const ltls_TypeArgs* entry = find_type_args(index, node->node);
+	if (!entry)
+	{
+		if (count) *count = 0;
+		return 0;
+	}
+	if (count) *count = entry->count;
+	return entry->args;
+}
+
+static uint8_t same_arguments(const ltls_Index* index, const ltls_TypeSet* left, uint32_t left_count,
+                              const ltls_TypeSet* right, uint32_t right_count)
+{
+	if (left_count != right_count) return 0;
+	for (uint32_t i = 0; i < left_count; i++)
+		if (!ltls_type_equals(left[i], right[i])) return 0;
+	return 1;
+}
+
+ltls_TypeSet ltls_type_instance(ltls_Index* index, lt_AstNode* class_node, const ltls_TypeSet* args, uint32_t count)
+{
+	if (!class_node) return 0;
+
+	for (uint32_t i = 0; i < index->type_args_count; i++)
+	{
+		const ltls_TypeArgs* entry = &index->type_args[i];
+		if (entry->base != class_node) continue;
+		if (!same_arguments(index, entry->args, entry->count, args, count)) continue;
+		return ltls_type_add(index, 0, LTLS_TYPE_INSTANCE, entry->marker);
+	}
+
+	lt_AstNode* marker = synthetic_node(index, LT_AST_NODE_CLASS);
+	if (!marker) return ltls_type_add(index, 0, LTLS_TYPE_INSTANCE, class_node);
+
+	ltls_TypeArgs* entries = realloc(index->type_args, sizeof(ltls_TypeArgs) * (index->type_args_count + 1));
+	if (!entries) return ltls_type_add(index, 0, LTLS_TYPE_INSTANCE, class_node);
+
+	ltls_TypeSet* copies = count ? malloc(sizeof(ltls_TypeSet) * count) : 0;
+	if (count && !copies) return ltls_type_add(index, 0, LTLS_TYPE_INSTANCE, class_node);
+	for (uint32_t i = 0; i < count; i++) copies[i] = args[i];
+
+	index->type_args = entries;
+	ltls_TypeArgs* entry = &index->type_args[index->type_args_count++];
+	entry->marker = marker;
+	entry->base = class_node;
+	entry->args = copies;
+	entry->count = count;
+
+	return ltls_type_add(index, 0, LTLS_TYPE_INSTANCE, marker);
+}
+
+static ltls_TypeSet substitute_types(ltls_Index* index, ltls_TypeSet types, const char* const* names,
+                                     const ltls_TypeSet* args, uint32_t count, uint8_t depth);
+
+static ltls_TypeSet substitute_function(ltls_Index* index, lt_AstNode* fn, const char* const* names,
+                                        const ltls_TypeSet* args, uint32_t count, uint8_t depth)
+{
+	lt_AstNode* copy = synthetic_node(index, LT_AST_NODE_FN);
+	if (!copy) return 0;
+
+	ltls_TypeSet returns = substitute_types(index, ltls_index_returns(index, fn), names, args, count, depth + 1);
+	if (returns) ltls_index_add_return(index, copy, returns);
+
+	const ltls_Tuple* tuple = ltls_index_tuple(index, fn);
+	if (tuple)
+	{
+		ltls_TypeSet items[16];
+		uint32_t item_count = tuple->count < 16 ? tuple->count : 0;
+		if (tuple->known)
+			for (uint32_t i = 0; i < item_count; i++)
+				items[i] = substitute_types(index, tuple->items[i], names, args, count, depth + 1);
+		ltls_index_set_tuple(index, copy, substitute_types(index, tuple->element, names, args, count, depth + 1),
+			items, item_count, tuple->known && tuple->count <= 16);
+	}
+
+	return ltls_type_add(index, 0, LTLS_TYPE_FUNCTION, copy);
+}
+
+static ltls_TypeSet substitute_types(ltls_Index* index, ltls_TypeSet types, const char* const* names,
+                                     const ltls_TypeSet* args, uint32_t count, uint8_t depth)
+{
+	if (depth > 8) return types;
+
+	ltls_TypeSet result = 0;
+	for (ltls_TypeSet type = types; type; type = type->next)
+	{
+		if (type->kind == LTLS_TYPE_PARAM)
+		{
+			for (uint32_t i = 0; i < count; i++)
+			{
+				if (!type->name || !names[i] || strcmp(type->name, names[i]) != 0) continue;
+				if (args[i]) result = ltls_type_union(index, result, args[i]);
+				break;
+			}
+			continue;
+		}
+
+		if (type->kind == LTLS_TYPE_ARRAY)
+		{
+			ltls_TypeSet element = substitute_types(index,
+				ltls_index_array_element(index, type->node), names, args, count, depth + 1);
+			result = ltls_type_union(index, result, ltls_type_array(index, element));
+			continue;
+		}
+
+		if (type->kind == LTLS_TYPE_FUNCTION)
+		{
+			result = ltls_type_union(index, result,
+				substitute_function(index, type->node, names, args, count, depth));
+			continue;
+		}
+
+		if (type->kind == LTLS_TYPE_INSTANCE)
+		{
+			const ltls_TypeArgs* entry = find_type_args(index, type->node);
+			if (entry)
+			{
+				ltls_TypeSet substituted[16];
+				uint32_t limit = entry->count < 16 ? entry->count : 16;
+				for (uint32_t i = 0; i < limit; i++)
+					substituted[i] = substitute_types(index, entry->args[i], names, args, count, depth + 1);
+				result = ltls_type_union(index, result, ltls_type_instance(index, entry->base, substituted, limit));
+				continue;
+			}
+		}
+
+		result = ltls_type_add(index, result, type->kind, type->node);
+	}
+	return result;
+}
+
+ltls_TypeSet ltls_index_substitute(ltls_Index* index, ltls_TypeSet types, const char* const* names,
+                                   const ltls_TypeSet* args, uint32_t count)
+{
+	return substitute_types(index, types, names, args, count, 0);
+}
+
+const ltls_Declaration* ltls_index_member_substituted(const ltls_Index* index, ltls_TypeSet receiver,
+                                                      lt_Token* token, ltls_TypeSet* resolved)
+{
+	if (resolved) *resolved = 0;
+
+	for (ltls_TypeSet type = receiver; type; type = type->next)
+	{
+		const ltls_Declaration* declaration = 0;
+
+		if (type->kind == LTLS_TYPE_INSTANCE)
+		{
+			lt_AstNode* base = ltls_index_class_base(index, type->node);
+			declaration = resolve_member(index, base, token);
+			if (!declaration) continue;
+
+			const ltls_TypeArgs* entry = find_type_args(index, type->node);
+			uint32_t generic_count = 0;
+			const char* const* names = ltls_index_generics(index, base, &generic_count);
+			if (resolved)
+			{
+				if (entry && names && entry->count == generic_count)
+					*resolved = ltls_index_substitute((ltls_Index*)index, declaration->types,
+						names, entry->args, entry->count);
+				else *resolved = declaration->types;
+			}
+			return declaration;
+		}
+
+		if (type->kind == LTLS_TYPE_TABLE)
+		{
+			declaration = resolve_table_field(index, type->node, token);
+			if (!declaration) continue;
+			if (resolved) *resolved = declaration->types;
+			return declaration;
+		}
+	}
+
+	return 0;
+}
+
 void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffer, size_t size)
 {
 	if (size == 0) return;
@@ -1825,6 +2129,7 @@ void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffe
 	size_t used = 0;
 	for (ltls_TypeSet type = types; type; type = type->next)
 	{
+		char composed[256];
 		const char* name = "unknown";
 		switch (type->kind)
 		{
@@ -1835,8 +2140,25 @@ void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffe
 		case LTLS_TYPE_TABLE: name = "table"; break;
 		case LTLS_TYPE_ARRAY: name = "array"; break;
 		case LTLS_TYPE_FUNCTION: name = "fn"; break;
-		case LTLS_TYPE_CLASS: name = type_node_name(index, type->node); break;
-		case LTLS_TYPE_INSTANCE: name = type_node_name(index, type->node); break;
+		case LTLS_TYPE_PARAM: name = type->name ? type->name : "?"; break;
+		case LTLS_TYPE_CLASS:
+		case LTLS_TYPE_INSTANCE: {
+			lt_AstNode* base = ltls_index_class_base(index, type->node);
+			name = type_node_name(index, base);
+			const ltls_TypeArgs* entry = find_type_args(index, type->node);
+			if (entry && entry->count)
+			{
+				size_t pos = (size_t)snprintf(composed, sizeof(composed), "%s<", name ? name : "?");
+				for (uint32_t i = 0; i < entry->count && pos < sizeof(composed); i++)
+				{
+					char argument[128];
+					ltls_type_describe(index, entry->args[i], argument, sizeof(argument));
+					pos += (size_t)snprintf(composed + pos, sizeof(composed) - pos, "%s%s", i ? ", " : "", argument);
+				}
+				if (pos < sizeof(composed)) snprintf(composed + pos, sizeof(composed) - pos, ">");
+				name = composed;
+			}
+		} break;
 		default: name = "unknown"; break;
 		}
 

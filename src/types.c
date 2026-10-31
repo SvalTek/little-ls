@@ -26,6 +26,8 @@ typedef struct {
 	ltls_TypeSet* env;
 	lt_Scope* frame;
 	lt_AstNode* function;
+	const char* const* generics;
+	uint32_t generic_count;
 	uint8_t changed;
 } ltls_Context;
 
@@ -68,6 +70,61 @@ static lt_AstNode* find_class(const ltls_Index* index, const char* name)
 	return 0;
 }
 
+static ltls_TypeSet annotation_type(ltls_Context* context, const char* type);
+static ltls_TypeSet annotation_generic(ltls_Context* context, char* text);
+static ltls_TypeSet annotation_segment(ltls_Context* context, char* text);
+
+/* Base<A, B> with balanced argument splitting. */
+static ltls_TypeSet annotation_generic(ltls_Context* context, char* text)
+{
+	char* open = strchr(text, '<');
+	if (!open) return 0;
+	char* close = strrchr(open, '>');
+	if (!close || close[1] != 0) return 0;
+
+	*open = 0;
+	char* base = text;
+	while (*base == ' ' || *base == '\t') base++;
+	char* base_end = open;
+	while (base_end > base && (base_end[-1] == ' ' || base_end[-1] == '\t')) base_end--;
+	*base_end = 0;
+
+	lt_AstNode* klass = find_class(context->index, base);
+	if (!klass) return 0;
+
+	uint32_t generic_count = 0;
+	ltls_index_generics(context->index, klass, &generic_count);
+
+	ltls_TypeSet args[16];
+	uint32_t count = 0;
+	int depth = 0;
+	char* start = open + 1;
+
+	for (char* cursor = open + 1; cursor <= close; cursor++)
+	{
+		char c = *cursor;
+		if (cursor < close)
+		{
+			if (c == '<' || c == '{' || c == '[') depth++;
+			else if (c == '>' || c == '}' || c == ']') { if (depth) depth--; }
+			if (depth || c != ',') continue;
+		}
+
+		char saved = *cursor;
+		*cursor = 0;
+		char* segment = start;
+		while (*segment == ' ' || *segment == '\t') segment++;
+		char* segment_end = start + strlen(start);
+		while (segment_end > segment && (segment_end[-1] == ' ' || segment_end[-1] == '\t')) *--segment_end = 0;
+		if (*segment && count < 16) args[count++] = annotation_type(context, segment);
+		if (cursor < close) *cursor = saved;
+		start = cursor + 1;
+	}
+
+	if (!generic_count || count != generic_count) return 0;
+	return ltls_type_instance(context->index, klass, args, count);
+}
+
 static ltls_TypeSet annotation_segment(ltls_Context* context, char* text)
 {
 	while (*text == ' ' || *text == '\t') text++;
@@ -76,6 +133,11 @@ static ltls_TypeSet annotation_segment(ltls_Context* context, char* text)
 	if (length == 0) return 0;
 
 	if (strcmp(text, "?") == 0 || strcmp(text, "any") == 0 || strcmp(text, "unknown") == 0) return 0;
+	for (uint32_t i = 0; i < context->generic_count; i++)
+		if (context->generics[i] && strcmp(text, context->generics[i]) == 0)
+			return ltls_type_param(context->index, text);
+
+	if (strchr(text, '<')) return annotation_generic(context, text);
 
 	size_t suffix = strlen(text);
 	if (suffix > 2 && text[suffix - 1] == ']' && text[suffix - 2] == '[')
@@ -125,12 +187,15 @@ static ltls_TypeSet annotation_type(ltls_Context* context, const char* type)
 	ltls_TypeSet result = 0;
 	char* segment = buffer;
 	int depth = 0;
+	int angle = 0;
 	for (char* position = buffer; ; position++)
 	{
 		if (*position == '{') depth++;
 		else if (*position == '}' && depth) depth--;
+		else if (*position == '<') angle++;
+		else if (*position == '>' && angle) angle--;
 
-		if (depth) continue;
+		if (depth || angle) continue;
 		if (*position != '|' && *position != 0) continue;
 
 		char saved = *position;
@@ -254,12 +319,30 @@ static ltls_TypeSet member_type(ltls_Context* context, ltls_TypeSet receiver, lt
 	for (ltls_TypeSet type = receiver; type; type = type->next)
 	{
 		const ltls_Declaration* declaration = 0;
-		if (type->kind == LTLS_TYPE_INSTANCE)
-			declaration = ltls_index_member(context->index, type->node, member);
-		else if (type->kind == LTLS_TYPE_TABLE)
-			declaration = ltls_index_table_field(context->index, type->node, member);
+		ltls_TypeSet value = 0;
 
-		if (declaration) result = ltls_type_union(context->index, result, declaration->types);
+		if (type->kind == LTLS_TYPE_INSTANCE)
+		{
+			lt_AstNode* base = ltls_index_class_base(context->index, type->node);
+			declaration = ltls_index_member(context->index, base, member);
+			if (declaration)
+			{
+				uint32_t argument_count = 0;
+				const ltls_TypeSet* arguments = ltls_index_type_args(context->index, type, &argument_count);
+				uint32_t generic_count = 0;
+				const char* const* names = ltls_index_generics(context->index, base, &generic_count);
+				if (arguments && names && argument_count == generic_count)
+					value = ltls_index_substitute(context->index, declaration->types,
+						names, arguments, argument_count);
+			}
+		}
+		else if (type->kind == LTLS_TYPE_TABLE)
+		{
+			declaration = ltls_index_table_field(context->index, type->node, member);
+		}
+
+		if (declaration) result = ltls_type_union(context->index, result,
+			value ? value : declaration->types);
 	}
 	return result;
 }
@@ -374,8 +457,16 @@ static uint8_t call_stream(ltls_Context* context, lt_AstNode* call, ltls_TypeSet
 
 static void apply_function_docs(ltls_Context* context, lt_AstNode* fn)
 {
+	context->generics = ltls_index_generics(context->index, fn, &context->generic_count);
+
 	ltls_Doc doc;
 	if (!context->analysis || !ltls_doc_for_line(&context->analysis->tokens, fn->loc.line, &doc)) return;
+
+	if (doc.generic_count)
+	{
+		ltls_index_set_generics(context->index, fn, doc.generics, doc.generic_count);
+		context->generics = ltls_index_generics(context->index, fn, &context->generic_count);
+	}
 
 	for (uint32_t i = 0; i < doc.param_count; i++)
 	{
@@ -414,6 +505,8 @@ static ltls_TypeSet analyze_function(ltls_Context* context, lt_AstNode* fn)
 	ltls_TypeSet* saved_env = context->env;
 	lt_Scope* saved_frame = context->frame;
 	lt_AstNode* saved_function = context->function;
+	const char* const* saved_generics = context->generics;
+	uint32_t saved_generic_count = context->generic_count;
 
 	context->env = calloc(context->index->declaration_count ? context->index->declaration_count : 1,
 		sizeof(ltls_TypeSet));
@@ -428,16 +521,96 @@ static ltls_TypeSet analyze_function(ltls_Context* context, lt_AstNode* fn)
 	context->env = saved_env;
 	context->frame = saved_frame;
 	context->function = saved_function;
+	context->generics = saved_generics;
+	context->generic_count = saved_generic_count;
 
 	return ltls_type_add(context->index, 0, LTLS_TYPE_FUNCTION, fn);
+}
+
+static void bind_type_name(ltls_Context* context, const char* const* names, uint32_t count,
+                           const char* name, ltls_TypeSet value, ltls_TypeSet* bindings)
+{
+	if (!name || !value) return;
+	for (uint32_t i = 0; i < count; i++)
+	{
+		if (strcmp(names[i], name) != 0) continue;
+		bindings[i] = ltls_type_union(context->index, bindings[i], value);
+		return;
+	}
+}
+
+static void bind_parameter(ltls_Context* context, const char* const* names, uint32_t count,
+                           ltls_TypeSet parameter, ltls_TypeSet argument, ltls_TypeSet* bindings)
+{
+	for (ltls_TypeSet type = parameter; type; type = type->next)
+	{
+		if (type->kind == LTLS_TYPE_PARAM)
+		{
+			bind_type_name(context, names, count, type->name, argument, bindings);
+			continue;
+		}
+
+		if (type->kind == LTLS_TYPE_INSTANCE)
+		{
+			uint32_t parameter_count = 0;
+			const ltls_TypeSet* parameters = ltls_index_type_args(context->index, type, &parameter_count);
+			if (!parameters || !parameter_count) continue;
+
+			for (ltls_TypeSet value = argument; value; value = value->next)
+			{
+				if (value->kind != LTLS_TYPE_INSTANCE) continue;
+				uint32_t argument_count = 0;
+				const ltls_TypeSet* actual = ltls_index_type_args(context->index, value, &argument_count);
+				if (!actual || argument_count != parameter_count) continue;
+
+				for (uint32_t i = 0; i < parameter_count; i++)
+					for (ltls_TypeSet variable = parameters[i]; variable; variable = variable->next)
+						if (variable->kind == LTLS_TYPE_PARAM)
+							bind_type_name(context, names, count, variable->name, actual[i], bindings);
+			}
+			continue;
+		}
+
+		if (type->kind != LTLS_TYPE_ARRAY) continue;
+		ltls_TypeSet element = ltls_index_array_element(context->index, type->node);
+		if (!element) continue;
+
+		for (ltls_TypeSet value = argument; value; value = value->next)
+		{
+			if (value->kind != LTLS_TYPE_ARRAY) continue;
+			ltls_TypeSet argument_element = ltls_index_array_element(context->index, value->node);
+			for (ltls_TypeSet variable = element; variable; variable = variable->next)
+				if (variable->kind == LTLS_TYPE_PARAM)
+					bind_type_name(context, names, count, variable->name, argument_element, bindings);
+		}
+	}
+}
+
+static const ltls_Declaration* member_named(const ltls_Index* index, lt_AstNode* class_node, const char* name)
+{
+	for (uint32_t i = 0; i < index->declaration_count; i++)
+	{
+		const ltls_Declaration* declaration = &index->declarations[i];
+		if (declaration->node != class_node) continue;
+		if (declaration->kind < LTLS_DECL_FIELD || declaration->kind > LTLS_DECL_PROPERTY) continue;
+		const char* candidate = token_text(index, declaration->name);
+		if (candidate && strcmp(candidate, name) == 0) return declaration;
+	}
+	return 0;
 }
 
 static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 {
 	ltls_TypeSet callee = analyze_expression(context, node->call.callee);
-	ltls_TypeSet first = node->call.args[0] ? analyze_expression(context, node->call.args[0]) : 0;
-	for (uint8_t i = 1; i <= LT_MAX_CALL_ARGS + 1; i++)
-		analyze_expression(context, node->call.args[i]);
+	ltls_TypeSet argument_types[16];
+	uint32_t argument_count = 0;
+	for (uint8_t i = 0; i <= LT_MAX_CALL_ARGS + 1; i++)
+	{
+		if (!node->call.args[i]) break;
+		ltls_TypeSet type = analyze_expression(context, node->call.args[i]);
+		if (argument_count < 16) argument_types[argument_count++] = type;
+	}
+	ltls_TypeSet first = argument_count ? argument_types[0] : 0;
 
 	/* The parser builds an import expression with a synthetic callee, so it is
 	   recognized by name rather than through the reference table. */
@@ -512,6 +685,73 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 		if (preserved) result = preserved;
 	}
 
+	/* Bind generic parameters from argument types. */
+	ltls_TypeSet inferred_instances = 0;
+	for (ltls_TypeSet type = callee; type; type = type->next)
+	{
+		if (type->kind == LTLS_TYPE_FUNCTION)
+		{
+			lt_AstNode* fn = type->node;
+			uint32_t generic_count = 0;
+			const char* const* names = ltls_index_generics(context->index, fn, &generic_count);
+			if (!generic_count || generic_count > 16) continue;
+
+			ltls_TypeSet bindings[16];
+			memset(bindings, 0, sizeof(bindings));
+
+			uint8_t start = 0;
+			const char* first_name = fn && fn->fn.args[0] ? token_text(context->index, fn->fn.args[0]) : 0;
+			if (first_name && strcmp(first_name, "this") == 0) start = 1;
+
+			for (uint32_t i = 0; i < argument_count; i++)
+			{
+				lt_Token* parameter = fn->fn.args[start + i];
+				if (!parameter) break;
+				ltls_Declaration* declaration = declaration_for_token(context->index, parameter);
+				if (!declaration || !declaration->types) continue;
+				bind_parameter(context, names, generic_count, declaration->types, argument_types[i], bindings);
+			}
+
+			ltls_TypeSet substituted = ltls_index_substitute(context->index,
+				ltls_index_returns(context->index, fn), names, bindings, generic_count);
+			if (substituted) result = substituted;
+		}
+		else if (type->kind == LTLS_TYPE_CLASS)
+		{
+			lt_AstNode* klass = type->node;
+			uint32_t generic_count = 0;
+			const char* const* names = ltls_index_generics(context->index, klass, &generic_count);
+			if (!generic_count || generic_count > 16) continue;
+
+			const ltls_Declaration* constructor = member_named(context->index, klass, "constructor");
+			lt_AstNode* fn = constructor ? ltls_index_function_node(constructor) : 0;
+			if (!fn) continue;
+
+			ltls_TypeSet bindings[16];
+			memset(bindings, 0, sizeof(bindings));
+
+			uint8_t start = 0;
+			const char* first_name = fn->fn.args[0] ? token_text(context->index, fn->fn.args[0]) : 0;
+			if (first_name && strcmp(first_name, "this") == 0) start = 1;
+
+			uint8_t bound = 0;
+			for (uint32_t i = 0; i < argument_count; i++)
+			{
+				lt_Token* parameter = fn->fn.args[start + i];
+				if (!parameter) break;
+				ltls_Declaration* declaration = declaration_for_token(context->index, parameter);
+				if (!declaration || !declaration->types) continue;
+				bind_parameter(context, names, generic_count, declaration->types, argument_types[i], bindings);
+			}
+			for (uint32_t i = 0; i < generic_count; i++) if (bindings[i]) bound = 1;
+
+			if (bound)
+				inferred_instances = ltls_type_union(context->index, inferred_instances,
+					ltls_type_instance(context->index, klass, bindings, generic_count));
+		}
+	}
+
+	if (inferred_instances) result = inferred_instances;
 	return result;
 }
 
@@ -926,6 +1166,11 @@ static void apply_declaration_annotations(ltls_Context* context)
 	for (uint32_t i = 0; i < context->index->declaration_count; i++)
 	{
 		ltls_Declaration* declaration = &context->index->declarations[i];
+		const char* const* saved_generics = context->generics;
+		uint32_t saved_generic_count = context->generic_count;
+		context->generics = declaration->node
+			? ltls_index_generics(context->index, declaration->node, &context->generic_count) : 0;
+		if (!declaration->node) context->generic_count = 0;
 
 		if (declaration->annotation)
 		{
@@ -941,12 +1186,16 @@ static void apply_declaration_annotations(ltls_Context* context)
 		if (declaration->returns_text && declaration->function_node)
 		{
 			ltls_TypeSet returns = annotation_type(context, declaration->returns_text);
-			if (!returns) continue;
-
-			ltls_TypeSet before = ltls_index_returns(context->index, declaration->function_node);
-			ltls_TypeSet after = ltls_index_add_return(context->index, declaration->function_node, returns);
-			if (!ltls_type_equals(before, after)) context->changed = 1;
+			if (returns)
+			{
+				ltls_TypeSet before = ltls_index_returns(context->index, declaration->function_node);
+				ltls_TypeSet after = ltls_index_add_return(context->index, declaration->function_node, returns);
+				if (!ltls_type_equals(before, after)) context->changed = 1;
+			}
 		}
+
+		context->generics = saved_generics;
+		context->generic_count = saved_generic_count;
 	}
 }
 

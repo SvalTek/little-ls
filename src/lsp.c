@@ -666,7 +666,17 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 	yyjson_mut_val* result = 0;
 	if (declaration)
 	{
-		ltls_TypeSet override = (reference && !reference->member) ? reference->types : 0;
+		ltls_TypeSet override = 0;
+		if (reference)
+		{
+			if (!reference->member) override = reference->types;
+			else if (reference->types)
+			{
+				ltls_TypeSet resolved = 0;
+				ltls_index_member_substituted(&state.index, reference->types, reference->token, &resolved);
+				override = resolved;
+			}
+		}
 		char* signature = ltls_declaration_signature(&state.index, declaration, override);
 		ltls_Doc docs;
 		uint8_t has_docs = !declaration->from_doc && declaration->name->line > 0 &&

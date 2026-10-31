@@ -97,6 +97,38 @@ static char* bracket_value(const char** cursor, const char* end)
 	return trim_copy(start, (size_t)(close - start));
 }
 
+/* A name that may carry a space-separated generic list: Box<A, B>. */
+static char* next_generic_name_at(const char** cursor, const char* end, const char* source, lt_Span* span)
+{
+	const char* position = *cursor;
+	while (position < end && is_space(*position)) position++;
+
+	const char* start = position;
+	int angle = 0;
+	while (position < end)
+	{
+		char c = *position;
+		if (c == '<') angle++;
+		else if (c == '>' && angle) angle--;
+		else if (!angle && is_space(c)) break;
+		position++;
+	}
+	*cursor = position;
+
+	if (span)
+	{
+		span->start = (uint32_t)(start - source);
+		span->end = (uint32_t)(position - source);
+	}
+	if (position == start) return 0;
+	return duplicate(start, (size_t)(position - start));
+}
+
+static char* next_generic_name(const char** cursor, const char* end)
+{
+	return next_generic_name_at(cursor, end, *cursor, 0);
+}
+
 /* A type expression: a word or balanced `{ ... }` shape, optionally joined by
    `|` with spaces (`{ ok: boolean } | { error: string }`). */
 static char* next_type(const char** cursor, const char* end)
@@ -126,7 +158,15 @@ static char* next_type(const char** cursor, const char* end)
 		}
 		else
 		{
-			while (position < end && !is_space(*position) && *position != '|') position++;
+			int angle = 0;
+			while (position < end)
+			{
+				char c = *position;
+				if (c == '<') angle++;
+				else if (c == '>' && angle) angle--;
+				else if (!angle && (is_space(c) || c == '|')) break;
+				position++;
+			}
 		}
 
 		while (position + 1 < end && position[0] == '[' && position[1] == ']') position += 2;
@@ -212,6 +252,38 @@ static void append_description(ltls_Doc* doc, const char* text, size_t length)
 	doc->description[used + length] = 0;
 }
 
+static void push_generic_name(char*** names, uint32_t* count, const char* start, const char* end)
+{
+	while (start < end && is_space(*start)) start++;
+	while (end > start && is_space(end[-1])) end--;
+	if (start >= end) return;
+
+	char** items = realloc(*names, sizeof(char*) * (*count + 1));
+	char* copy = duplicate(start, (size_t)(end - start));
+	if (!items || !copy)
+	{
+		free(copy);
+		return;
+	}
+	*names = items;
+	(*names)[(*count)++] = copy;
+}
+
+static void parse_generic_list(ltls_Doc* doc, const char* start, const char* end, uint8_t for_class)
+{
+	while (start < end)
+	{
+		while (start < end && (is_space(*start) || *start == ',')) start++;
+		const char* token = start;
+		while (start < end && !is_space(*start) && *start != ',') start++;
+		if (start > token)
+		{
+			if (for_class) push_generic_name(&doc->class_generics, &doc->class_generic_count, token, start);
+			else push_generic_name(&doc->generics, &doc->generic_count, token, start);
+		}
+	}
+}
+
 static void parse_annotation(ltls_Doc* doc, const char* text, size_t length, const char* source,
                              uint16_t line, uint32_t line_start)
 {
@@ -256,11 +328,17 @@ static void parse_annotation(ltls_Doc* doc, const char* text, size_t length, con
 		return;
 	}
 
+	if (tag_length == 7 && memcmp(tag_start, "generic", 7) == 0)
+	{
+		parse_generic_list(doc, tag_end, end, 0);
+		return;
+	}
+
 	if (tag_length == 5 && memcmp(tag_start, "class", 5) == 0)
 	{
 		const char* cursor = tag_end;
 		lt_Span name_span = { 0, 0 };
-		char* name = next_word_at(&cursor, end, source, &name_span);
+		char* name = next_generic_name_at(&cursor, end, source, &name_span);
 		if (!name)
 		{
 			push_tag(doc, text, length);
@@ -268,12 +346,24 @@ static void parse_annotation(ltls_Doc* doc, const char* text, size_t length, con
 		}
 
 		char* base = 0;
+		char* open = strchr(name, '<');
+		if (open)
+		{
+			char* close = strrchr(open, '>');
+			if (close && close[1] == 0)
+			{
+				parse_generic_list(doc, open + 1, close, 1);
+				*open = 0;
+				name_span.end = name_span.start + (uint32_t)strlen(name);
+			}
+		}
+
 		const char* position = cursor;
 		while (position < end && is_space(*position)) position++;
 		if (position < end && *position == ':')
 		{
 			cursor = position + 1;
-			base = next_word(&cursor, end);
+			base = next_generic_name(&cursor, end);
 		}
 
 		doc->class_name = name;
@@ -441,6 +531,10 @@ void ltls_doc_free(ltls_Doc* doc)
 	free(doc->fields);
 	free(doc->class_name);
 	free(doc->class_base);
+	for (uint32_t i = 0; i < doc->class_generic_count; i++) free(doc->class_generics[i]);
+	free(doc->class_generics);
+	for (uint32_t i = 0; i < doc->generic_count; i++) free(doc->generics[i]);
+	free(doc->generics);
 	for (uint32_t i = 0; i < doc->tag_count; i++) free(doc->tags[i]);
 	free(doc->tags);
 	memset(doc, 0, sizeof(ltls_Doc));

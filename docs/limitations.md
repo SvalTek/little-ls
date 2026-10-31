@@ -49,6 +49,27 @@ surprising. It is not a bug list; most of these are bounded choices.
 - Type text renders arrays as `array`; element types appear only through
   indexing, not in the rendered type name.
 
+## Generics
+
+- Generics are tooling-only. No runtime effect, no diagnostics for mismatched
+  arguments.
+- `@generic` is only read on function docs. Class parameters must be declared
+  with `@class Name<T>`.
+- Inference unifies only a direct `T`, arrays `T[]`, and generic arguments
+  such as `Box<T>`. Callbacks, structural shapes and deeper nesting are not
+  unified.
+- There are no explicit call-site type arguments, bounds, constraints,
+  variance or defaults. An unbound variable is unknown.
+- Generic superclass chains are not substituted; only the class's own members
+  are specialised.
+- Method and constructor parameter annotations keep `T`; substitution applies
+  to member result types (fields, getters, method returns) reached through an
+  instantiated receiver.
+- Instantiation is capped at 16 type arguments and substitution recursion at
+  8 levels.
+- `Box<number>` is matched by exact argument sets; there is no widening or
+  normalisation beyond type union identity.
+
 ## Annotations and docs
 
 - Doc blocks must sit directly above the declaration: no blank line, `;;`

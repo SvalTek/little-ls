@@ -37,6 +37,10 @@ typedef struct {
 	uint32_t field_count;
 	char* class_name;
 	char* class_base;
+	char** class_generics;
+	uint32_t class_generic_count;
+	char** generics;
+	uint32_t generic_count;
 	lt_Span class_span;
 	uint16_t class_line;
 	uint16_t class_col;

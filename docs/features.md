@@ -41,6 +41,8 @@ functions or blocks are not emitted.
   enclosing class or owning table.
 - Virtual `@class`/`@field` declarations are hoverable; their fields resolve
   like real members.
+- Generic types render with their arguments, e.g. `var box: Box<number>`;
+  member access on an instantiated type uses substituted member types.
 
 ## Definition
 

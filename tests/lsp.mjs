@@ -1074,6 +1074,113 @@ async function main() {
   assert.ok(importDefinition.result.uri.endsWith("/mod.little"), "definition should target the module");
   assert.equal(importDefinition.result.range.start.line, 9);
 
+  const genericUri = "file:///test/generics.little";
+  const genericText = [
+    ";; @generic T",
+    ";; @param T value",
+    ";; @return T",
+    "fn identity(value) {",
+    "  return value",
+    "}",
+    "var n = identity(1)",
+    "var s = identity(\"x\")",
+    "",
+    ";; @class Box<T>",
+    ";; @field T value",
+    "class Box {",
+    "  ;; @param T value",
+    "  constructor(value) {",
+    "    this.value = value",
+    "  }",
+    "  ;; @return T",
+    "  read() {",
+    "    return this.value",
+    "  }",
+    "}",
+    "var b = Box(1)",
+    "var v = b.read()",
+    "var bv = b.value",
+    "var sb = Box(\"text\")",
+    "var sv = sb.read()",
+    "",
+    ";; @param Box<number> b",
+    "fn show(b) {",
+    "  var x = b.read()",
+    "}",
+    "",
+    ";; @generic T",
+    ";; @param Box<T> box",
+    ";; @return T",
+    "fn unwrap(box) {",
+    "  return box.read()",
+    "}",
+    "var u = unwrap(Box(5))",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: genericUri, languageId: "little", version: 1, text: genericText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === genericUri, "generic diagnostics");
+
+  async function genericHover(id, line, character) {
+    send({ jsonrpc: "2.0", id, method: "textDocument/hover", params: { textDocument: { uri: genericUri }, position: { line, character } } });
+    return waitFor((message) => message.id === id, "generic hover " + line);
+  }
+
+  assert.match((await genericHover(120, 6, 4)).result.contents.value, /var n: number/);
+  assert.match((await genericHover(121, 7, 4)).result.contents.value, /var s: string/);
+  assert.match((await genericHover(122, 21, 4)).result.contents.value, /var b: Box<number>/);
+  assert.match((await genericHover(123, 22, 4)).result.contents.value, /var v: number/);
+  assert.match((await genericHover(124, 23, 4)).result.contents.value, /var bv: number/);
+  assert.match((await genericHover(125, 24, 4)).result.contents.value, /var sb: Box<string>/);
+  assert.match((await genericHover(126, 25, 4)).result.contents.value, /var sv: string/);
+  assert.match((await genericHover(127, 29, 6)).result.contents.value, /var x: number/);
+  assert.match((await genericHover(128, 38, 4)).result.contents.value, /var u: number/);
+
+  send({ jsonrpc: "2.0", id: 129, method: "textDocument/completion", params: { textDocument: { uri: genericUri }, position: { line: 23, character: 11 } } });
+  const genericCompletion = await waitFor((message) => message.id === 129, "generic completion");
+  assert.deepEqual(genericCompletion.result.items.map((item) => item.label).sort(), ["constructor", "read", "value"]);
+
+  const pairUri = "file:///test/pair.little";
+  const pairText = [
+    ";; @class Pair<A, B>",
+    ";; @field A first",
+    ";; @field B second",
+    "class Pair {",
+    "  ;; @param A first",
+    "  ;; @param B second",
+    "  constructor(first, second) {",
+    "    this.first = first",
+    "    this.second = second",
+    "  }",
+    "}",
+    "var p = Pair(1, \"two\")",
+    "var pf = p.first",
+    "var ps = p.second",
+    ";; @param Pair<number | null, string> q",
+    "fn useUnion(q) {",
+    "  var n = q.first",
+    "}",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: pairUri, languageId: "little", version: 1, text: pairText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === pairUri, "pair diagnostics");
+
+  async function pairHover(id, line, character) {
+    send({ jsonrpc: "2.0", id, method: "textDocument/hover", params: { textDocument: { uri: pairUri }, position: { line, character } } });
+    return waitFor((message) => message.id === id, "pair hover " + line);
+  }
+
+  assert.match((await pairHover(130, 12, 4)).result.contents.value, /var pf: number/);
+  assert.match((await pairHover(131, 13, 4)).result.contents.value, /var ps: string/);
+  assert.match((await pairHover(132, 16, 6)).result.contents.value, /var n: (number \| null|null \| number)/);
+
   send({ jsonrpc: "2.0", id: 69, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 14 } } });
   const tableThisTarget = await waitFor((message) => message.id === 69, "table this target hover");
   assert.match(tableThisTarget.result.contents.value, /this: table/);

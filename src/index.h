@@ -14,7 +14,8 @@ typedef enum {
 	LTLS_TYPE_ARRAY,
 	LTLS_TYPE_FUNCTION,
 	LTLS_TYPE_CLASS,
-	LTLS_TYPE_INSTANCE
+	LTLS_TYPE_INSTANCE,
+	LTLS_TYPE_PARAM
 } ltls_TypeKind;
 
 /* Immutable union of alternatives. `node` identifies the shape for table,
@@ -22,6 +23,7 @@ typedef enum {
 typedef struct ltls_TypeSetNode {
 	uint8_t kind;
 	lt_AstNode* node;
+	const char* name; /* type variable name for LTLS_TYPE_PARAM */
 	struct ltls_TypeSetNode* next;
 } ltls_TypeSetNode;
 
@@ -92,6 +94,19 @@ typedef struct {
 
 typedef struct {
 	lt_AstNode* node;
+	char** names;
+	uint32_t count;
+} ltls_Generics;
+
+typedef struct {
+	lt_AstNode* marker; /* synthetic class node used by the instance type */
+	lt_AstNode* base;   /* real class node */
+	ltls_TypeSet* args;
+	uint32_t count;
+} ltls_TypeArgs;
+
+typedef struct {
+	lt_AstNode* node;
 	uint8_t known;        /* arity and per-position types are exact */
 	uint32_t count;
 	ltls_TypeSet* items;  /* one per position when known */
@@ -123,6 +138,14 @@ typedef struct {
 	/* resolved module path -> exported value type */
 	ltls_ImportEntry* imports;
 	uint32_t import_count;
+
+	/* generic parameter names per function/class node, and instance arguments */
+	ltls_Generics* generics;
+	uint32_t generic_count;
+	ltls_TypeArgs* type_args;
+	uint32_t type_args_count;
+	char** param_names;
+	uint32_t param_name_count;
 
 	/* text for synthetic tokens created from doc shapes */
 	ltls_TokenText* token_texts;
@@ -211,6 +234,18 @@ ltls_TypeSet ltls_import_value(ltls_Index* index, const char* specifier);
 ltls_TypeSet ltls_import_cached(const ltls_Index* index, const char* specifier);
 void ltls_index_preload_imports(ltls_Index* index);
 void ltls_imports_configure(const char* workspace_root_uri);
+
+/* Generic support: type variables, class arguments and substitution. */
+ltls_TypeSet ltls_type_param(ltls_Index* index, const char* name);
+void ltls_index_set_generics(ltls_Index* index, lt_AstNode* node, char** names, uint32_t count);
+const char* const* ltls_index_generics(const ltls_Index* index, const lt_AstNode* node, uint32_t* count);
+ltls_TypeSet ltls_type_instance(ltls_Index* index, lt_AstNode* class_node, const ltls_TypeSet* args, uint32_t count);
+const ltls_TypeSet* ltls_index_type_args(const ltls_Index* index, const ltls_TypeSetNode* node, uint32_t* count);
+ltls_TypeSet ltls_index_substitute(ltls_Index* index, ltls_TypeSet types, const char* const* names,
+                                   const ltls_TypeSet* args, uint32_t count);
+const ltls_Declaration* ltls_index_member_substituted(const ltls_Index* index, ltls_TypeSet receiver,
+                                                      lt_Token* token, ltls_TypeSet* resolved);
+lt_AstNode* ltls_index_class_base(const ltls_Index* index, lt_AstNode* class_node);
 
 /* Renders a type set such as `LLMProvider` or `number | string`. */
 void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffer, size_t size);

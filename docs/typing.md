@@ -135,6 +135,58 @@ Modelling rules:
 - table destructuring binds by key through table fields;
 - final-argument expansion (`fn(1, unpack([2, 3]))`) is not typed.
 
+## Generics
+
+Generics are a tooling-only type system; they do not exist at runtime.
+
+```little
+;; @generic T
+;; @param T value
+;; @return T
+fn identity(value) { return value }
+
+;; @class Box<T>
+;; @field T value
+class Box {
+    ;; @param T value
+    constructor(value) { this.value = value }
+
+    ;; @return T
+    read() { return this.value }
+}
+
+var n = identity(1)        ; number
+var b = Box(1)             ; Box<number>
+var v = b.read()           ; number
+var sb = Box("text")       ; Box<string>
+```
+
+Declarations:
+
+- `@generic T, U` on a function doc block introduces type variables for that
+  block's `@param`/`@return` annotations.
+- `@class Name<T, U>` introduces class type parameters. They are also attached
+  to every member function, so constructor and method annotations may use them.
+- Type variables are ordinary type atoms in annotations and can appear in
+  unions, arrays and generic arguments: `T | null`, `T[]`, `Box<T>`.
+
+Instantiation:
+
+- `Box<number>` in an annotation parses as an instantiated class type.
+- Calling a class infers its arguments from the constructor's annotated
+  parameters: `Box(1)` is `Box<number>`.
+- Calling a generic function unifies argument types with parameter types.
+  Supported shapes are a direct `T`, `T[]`, and generic class arguments such
+  as `Box<T>`.
+- Unbound variables become unknown. There are no defaults, bounds or explicit
+  call-site type arguments.
+- Member access on an instantiated type substitutes class parameters in field
+  and method return types, so `b.read()` and `b.value` above are `number`.
+
+Generic types render as `Box<number>` in hover and variable signatures.
+Specializations are identified by the class and its argument types; the same
+class with different arguments yields distinct types.
+
 ## Standard library
 
 Standard symbols are generated from `[LittleBinding]` comments in the `little`
