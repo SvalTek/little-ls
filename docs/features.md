@@ -37,6 +37,8 @@ functions or blocks are not emitted.
 
 - Markdown block with the declaration's signature, followed by its `;;` doc
   block when present, followed by binding text for standard-library members.
+- Parameters show only their own `@param` description; the enclosing
+  function's documentation is not repeated on parameter hover.
 - `this` is special-cased: hovering it reports `this: ClassName` inside a
   class, or `this: table` inside a receiver function, and highlights the
   hovered token.

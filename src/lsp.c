@@ -643,6 +643,23 @@ static void markdown_append_docs(ltls_Markdown* markdown, const ltls_Doc* docs, 
 static lt_Token* token_at(const lt_Analysis* analysis, uint32_t offset);
 static const char* self_detail(const ltls_Index* index, lt_AstNode* self, char* buffer, size_t size);
 
+static void markdown_append_param_doc(ltls_Markdown* markdown, const ltls_Doc* docs, const char* name)
+{
+	if (!name) return;
+
+	for (uint32_t i = 0; i < docs->param_count; i++)
+	{
+		const ltls_DocParam* param = &docs->params[i];
+		if (!param->name || strcmp(param->name, name) != 0) continue;
+		if (param->description && param->description[0])
+		{
+			markdown_append(markdown, "\n\n");
+			markdown_append(markdown, param->description);
+		}
+		return;
+	}
+}
+
 static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 {
 	ltls_PositionContext* position = context;
@@ -703,8 +720,19 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 		}
 		char* signature = ltls_declaration_signature(&state.index, declaration, override);
 		ltls_Doc docs;
-		uint8_t has_docs = !declaration->from_doc && declaration->name->line > 0 &&
-			ltls_doc_for_line(&state.analysis.tokens, declaration->name->line, &docs);
+		uint8_t has_docs = 0;
+		uint8_t param_docs = 0;
+		if (!declaration->from_doc)
+		{
+			uint32_t doc_line = declaration->name->line;
+			if (declaration->kind == LTLS_DECL_PARAM && declaration->node)
+				doc_line = declaration->node->loc.line;
+			if (doc_line > 0 && ltls_doc_for_line(&state.analysis.tokens, doc_line, &docs))
+			{
+				has_docs = 1;
+				param_docs = declaration->kind == LTLS_DECL_PARAM;
+			}
+		}
 
 		ltls_Markdown markdown = { 0 };
 		markdown_append(&markdown, "```little\n");
@@ -712,9 +740,17 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 		markdown_append(&markdown, "\n```\n");
 		if (has_docs)
 		{
-			const char* own_class = declaration->kind == LTLS_DECL_CLASS
-				? ltls_index_token_text(&state.index, declaration->name) : 0;
-			markdown_append_docs(&markdown, &docs, own_class);
+			if (param_docs)
+			{
+				markdown_append_param_doc(&markdown, &docs,
+					ltls_index_token_text(&state.index, declaration->name));
+			}
+			else
+			{
+				const char* own_class = declaration->kind == LTLS_DECL_CLASS
+					? ltls_index_token_text(&state.index, declaration->name) : 0;
+				markdown_append_docs(&markdown, &docs, own_class);
+			}
 		}
 		if (declaration->detail)
 		{

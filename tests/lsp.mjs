@@ -1333,6 +1333,45 @@ async function main() {
   const optionCompletion = await waitFor((message) => message.id === 140, "struct completion");
   assert.deepEqual(optionCompletion.result.items.map((item) => item.label).sort(), ["baseUrl", "port"]);
 
+  const paramUri = "file:///test/paramhover.little";
+  const paramText = [
+    ";; @struct LLMProviderOpts",
+    ";; @field string baseUrl",
+    ";;",
+    ";; @class LLMProvider",
+    "class LLMProvider {",
+    "  ;; create a new LLMProvider",
+    "  ;; @param string name Name this Provider",
+    "  ;; @param LLMProviderOpts config Provider Config",
+    "  constructor(@name, config) {",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: paramUri, languageId: "little", version: 1, text: paramText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === paramUri, "param diagnostics");
+
+  async function paramHover(id, line, character) {
+    send({ jsonrpc: "2.0", id, method: "textDocument/hover", params: { textDocument: { uri: paramUri }, position: { line, character } } });
+    return waitFor((message) => message.id === id, "param hover");
+  }
+
+  const nameHover = await paramHover(141, 8, 16);
+  assert.match(nameHover.result.contents.value, /param name: string/);
+  assert.match(nameHover.result.contents.value, /Name this Provider/);
+  assert.doesNotMatch(nameHover.result.contents.value, /Provider Config/);
+  assert.doesNotMatch(nameHover.result.contents.value, /create a new LLMProvider/);
+
+  const configHover = await paramHover(142, 8, 23);
+  assert.match(configHover.result.contents.value, /param config: LLMProviderOpts/);
+  assert.match(configHover.result.contents.value, /Provider Config/);
+  assert.doesNotMatch(configHover.result.contents.value, /Name this Provider/);
+  assert.doesNotMatch(configHover.result.contents.value, /create a new LLMProvider/);
+
   send({ jsonrpc: "2.0", id: 69, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 14 } } });
   const tableThisTarget = await waitFor((message) => message.id === 69, "table this target hover");
   assert.match(tableThisTarget.result.contents.value, /this: table/);
