@@ -916,6 +916,54 @@ async function main() {
   const unionShapeField = await waitFor((message) => message.id === 87, "union shape field hover");
   assert.match(unionShapeField.result.contents.value, /field ok: bool/);
 
+  const arrayUri = "file:///test/arrays.little";
+  const arrayText = [
+    "var xs = [1, 2]",
+    "var first = xs[0]",
+    "var mixed = [1, \"x\"]",
+    "var dynamic = mixed[0]",
+    ";; @param number[] nums",
+    "fn f(nums) {",
+    "  var n = nums[0]",
+    "}",
+    ";; @return string[]",
+    "fn names() {",
+    "}",
+    "var ns = names()",
+    "var name = ns[0]",
+    "var parts = string.split(\"a,b\", \",\")",
+    "var part = parts[0]",
+    "var sliced = array.slice(xs, 0)",
+    "var sliceFirst = sliced[0]",
+    "var items = [{ ok: true }]",
+    "var item = items[0]",
+    "io.print(item.ok)",
+    "",
+  ].join("\n");
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: arrayUri, languageId: "little", version: 1, text: arrayText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === arrayUri, "array diagnostics");
+
+  async function arrayHover(id, line, character) {
+    send({ jsonrpc: "2.0", id, method: "textDocument/hover", params: { textDocument: { uri: arrayUri }, position: { line, character } } });
+    return waitFor((message) => message.id === id, `array hover ${line}`);
+  }
+
+  assert.match((await arrayHover(88, 0, 4)).result.contents.value, /var xs: array/);
+  assert.match((await arrayHover(89, 1, 4)).result.contents.value, /var first: number/);
+  assert.match((await arrayHover(90, 2, 4)).result.contents.value, /var mixed: array/);
+  const mixedElement = (await arrayHover(91, 3, 4)).result.contents.value;
+  assert.match(mixedElement, /var dynamic\n/);
+  assert.match((await arrayHover(92, 6, 6)).result.contents.value, /var n: number/);
+  assert.match((await arrayHover(93, 12, 4)).result.contents.value, /var name: string/);
+  assert.match((await arrayHover(94, 14, 4)).result.contents.value, /var part: string/);
+  assert.match((await arrayHover(95, 16, 4)).result.contents.value, /var sliceFirst: number/);
+  assert.match((await arrayHover(96, 18, 4)).result.contents.value, /var item: table/);
+  assert.match((await arrayHover(97, 19, 15)).result.contents.value, /field ok: bool/);
+
   send({ jsonrpc: "2.0", id: 69, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 14 } } });
   const tableThisTarget = await waitFor((message) => message.id === 69, "table this target hover");
   assert.match(tableThisTarget.result.contents.value, /this: table/);

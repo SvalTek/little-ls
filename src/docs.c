@@ -129,6 +129,8 @@ static char* next_type(const char** cursor, const char* end)
 			while (position < end && !is_space(*position) && *position != '|') position++;
 		}
 
+		while (position + 1 < end && position[0] == '[' && position[1] == ']') position += 2;
+
 		const char* probe = position;
 		while (probe < end && is_space(*probe)) probe++;
 		if (probe >= end || *probe != '|') break;

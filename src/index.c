@@ -1386,6 +1386,57 @@ static const char* type_node_name(const ltls_Index* index, lt_AstNode* node)
 	return "?";
 }
 
+ltls_TypeSet ltls_index_array_element(const ltls_Index* index, lt_AstNode* node)
+{
+	for (uint32_t i = 0; i < index->array_element_count; i++)
+		if (index->array_elements[i].node == node) return index->array_elements[i].types;
+	return 0;
+}
+
+void ltls_index_set_array_element(ltls_Index* index, lt_AstNode* node, ltls_TypeSet element)
+{
+	for (uint32_t i = 0; i < index->array_element_count; i++)
+	{
+		if (index->array_elements[i].node != node) continue;
+		index->array_elements[i].types = element;
+		return;
+	}
+
+	ltls_TypedNode* items = realloc(index->array_elements, sizeof(ltls_TypedNode) * (index->array_element_count + 1));
+	if (!items) return;
+	index->array_elements = items;
+	index->array_elements[index->array_element_count].node = node;
+	index->array_elements[index->array_element_count].types = element;
+	index->array_element_count++;
+}
+
+/* Anonymous array value with a known element union; reuses an equal shape so
+   unions of the same array type stay a single alternative. */
+ltls_TypeSet ltls_type_array(ltls_Index* index, ltls_TypeSet element)
+{
+	if (!element) return 0;
+
+	for (uint32_t i = 0; i < index->array_element_count; i++)
+	{
+		lt_AstNode* node = index->array_elements[i].node;
+		if (!node || node->type != LT_AST_NODE_ARRAY) continue;
+		if (ltls_type_equals(index->array_elements[i].types, element))
+			return ltls_type_add(index, 0, LTLS_TYPE_ARRAY, node);
+	}
+
+	lt_AstNode* node = calloc(1, sizeof(lt_AstNode));
+	if (!node) return 0;
+	node->type = LT_AST_NODE_ARRAY;
+
+	lt_AstNode** nodes = realloc(index->node_allocations, sizeof(lt_AstNode*) * (index->node_allocation_count + 1));
+	if (!nodes) { free(node); return 0; }
+	index->node_allocations = nodes;
+	index->node_allocations[index->node_allocation_count++] = node;
+
+	ltls_index_set_array_element(index, node, element);
+	return ltls_type_add(index, 0, LTLS_TYPE_ARRAY, node);
+}
+
 void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffer, size_t size)
 {
 	if (size == 0) return;

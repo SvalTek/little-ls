@@ -145,7 +145,7 @@ static const ltls_StdEntry ltls_std_members_string[] = {
 	{ "repeat", "fn string.repeat(str, count)", "returns a string consisting of the source repeated a non-negative whole number of times.\n- count: number of repetitions", "string" },
 	{ "replace", "fn string.replace(str, needle, replacement)", "returns a copy of a string with every occurrence of a needle replaced; an empty needle leaves the string unchanged.", "string" },
 	{ "rtrim", "fn string.rtrim(str)", "returns a copy of a string with trailing whitespace removed.", "string" },
-	{ "split", "fn string.split(str, separator)", "splits a string on every occurrence of a separator and returns the parts as an array, splitting into single characters when the separator is empty.", "array" },
+	{ "split", "fn string.split(str, separator)", "splits a string on every occurrence of a separator and returns the parts as an array, splitting into single characters when the separator is empty.", "string[]" },
 	{ "startsWith", "fn string.startsWith(str, prefix)", "reports whether a string begins with the given prefix.", "bool" },
 	{ "sub", "fn string.sub(str, start [, length])", "returns the substring starting at a zero-based offset, running to the end of the string or for a given length.\n- str: string to slice\n- start: zero-based offset of the first byte\n- length: number of bytes to copy; the rest of the string if omitted", "string" },
 	{ "trim", "fn string.trim(str)", "returns a copy of a string with whitespace removed from both ends.", "string" },

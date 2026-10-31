@@ -95,6 +95,10 @@ typedef struct {
 	ltls_TypedNode* function_returns;
 	uint32_t function_return_count;
 
+	/* array node -> element union (absent or null means unknown) */
+	ltls_TypedNode* array_elements;
+	uint32_t array_element_count;
+
 	/* text for synthetic tokens created from doc shapes */
 	ltls_TokenText* token_texts;
 	uint32_t token_text_count;
@@ -158,6 +162,12 @@ uint8_t ltls_type_equals(ltls_TypeSet left, ltls_TypeSet right);
 void ltls_index_set_type(ltls_Index* index, lt_AstNode* node, ltls_TypeSet types);
 ltls_TypeSet ltls_index_returns(const ltls_Index* index, lt_AstNode* node);
 ltls_TypeSet ltls_index_add_return(ltls_Index* index, lt_AstNode* node, ltls_TypeSet types);
+
+/* Array values carry their element union: annotations `T[]`, literals and
+   element-preserving producers. `element` null means unknown. */
+ltls_TypeSet ltls_type_array(ltls_Index* index, ltls_TypeSet element);
+ltls_TypeSet ltls_index_array_element(const ltls_Index* index, lt_AstNode* node);
+void ltls_index_set_array_element(ltls_Index* index, lt_AstNode* node, ltls_TypeSet element);
 
 /* Renders a type set such as `LLMProvider` or `number | string`. */
 void ltls_type_describe(const ltls_Index* index, ltls_TypeSet types, char* buffer, size_t size);

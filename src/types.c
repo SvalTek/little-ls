@@ -76,6 +76,14 @@ static ltls_TypeSet annotation_segment(ltls_Context* context, char* text)
 
 	if (strcmp(text, "?") == 0 || strcmp(text, "any") == 0 || strcmp(text, "unknown") == 0) return 0;
 
+	size_t suffix = strlen(text);
+	if (suffix > 2 && text[suffix - 1] == ']' && text[suffix - 2] == '[')
+	{
+		text[suffix - 2] = 0;
+		ltls_TypeSet element = annotation_segment(context, text);
+		return element ? ltls_type_array(context->index, element) : 0;
+	}
+
 	if (text[0] == '{')
 	{
 		lt_AstNode* shape = ltls_index_shape(context->index, text);
@@ -318,7 +326,8 @@ static ltls_TypeSet analyze_function(ltls_Context* context, lt_AstNode* fn)
 static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 {
 	ltls_TypeSet callee = analyze_expression(context, node->call.callee);
-	for (uint8_t i = 0; i <= LT_MAX_CALL_ARGS + 1; i++)
+	ltls_TypeSet first = node->call.args[0] ? analyze_expression(context, node->call.args[0]) : 0;
+	for (uint8_t i = 1; i <= LT_MAX_CALL_ARGS + 1; i++)
 		analyze_expression(context, node->call.args[i]);
 
 	ltls_TypeSet result = 0;
@@ -329,6 +338,31 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 		else if (type->kind == LTLS_TYPE_FUNCTION)
 			result = ltls_type_union(context->index, result, ltls_index_returns(context->index, type->node));
 	}
+
+	/* `array.slice` and `array.reverse` return a new array with the same
+	   elements; carry the source element type through. */
+	lt_Token* callee_token = 0;
+	if (node->call.callee->type == LT_AST_NODE_IDENTIFIER)
+		callee_token = node->call.callee->identifier.token;
+	else if (node->call.callee->type == LT_AST_NODE_INDEX)
+		callee_token = member_token(node->call.callee->index.idx);
+
+	const ltls_Declaration* declaration = callee_token
+		? ltls_index_resolve(context->index, callee_token->span.start, 0) : 0;
+
+	if (declaration && declaration->external && declaration->signature &&
+	    (strstr(declaration->signature, "array.slice(") || strstr(declaration->signature, "array.reverse(")))
+	{
+		ltls_TypeSet preserved = 0;
+		for (ltls_TypeSet type = first; type; type = type->next)
+		{
+			if (type->kind != LTLS_TYPE_ARRAY) continue;
+			ltls_TypeSet element = ltls_index_array_element(context->index, type->node);
+			if (element) preserved = ltls_type_union(context->index, preserved, ltls_type_array(context->index, element));
+		}
+		if (preserved) result = preserved;
+	}
+
 	return result;
 }
 
@@ -340,19 +374,26 @@ static ltls_TypeSet analyze_index(ltls_Context* context, lt_AstNode* node)
 	if (reference) reference->types = receiver;
 
 	lt_Token* member = member_token(node->index.idx);
-	if (!member) return 0;
-
-	if (reference && reference->member && !reference->receiver_expr && reference->class_node)
+	if (member && member->type == LT_TOKEN_IDENTIFIER)
 	{
-		const ltls_Declaration* declaration = ltls_index_member(context->index, reference->class_node, member);
-		if (declaration)
+		if (reference && reference->member && !reference->receiver_expr && reference->class_node)
 		{
-			reference->types = declaration->types;
-			return declaration->types;
+			const ltls_Declaration* declaration = ltls_index_member(context->index, reference->class_node, member);
+			if (declaration)
+			{
+				reference->types = declaration->types;
+				return declaration->types;
+			}
 		}
+
+		return member_type(context, receiver, member);
 	}
 
-	return member_type(context, receiver, member);
+	ltls_TypeSet element = 0;
+	for (ltls_TypeSet type = receiver; type; type = type->next)
+		if (type->kind == LTLS_TYPE_ARRAY)
+			element = ltls_type_union(context->index, element, ltls_index_array_element(context->index, type->node));
+	return element;
 }
 
 static void assign_target(ltls_Context* context, lt_AstNode* target, ltls_TypeSet types)
@@ -458,11 +499,19 @@ static ltls_TypeSet analyze_expression(ltls_Context* context, lt_AstNode* node)
 		type = analyze_table(context, node);
 		break;
 
-	case LT_AST_NODE_ARRAY:
+	case LT_AST_NODE_ARRAY: {
+		ltls_TypeSet elements = 0;
 		for (uint32_t i = 0; i < node->array.values.length; i++)
-			analyze_expression(context, *AT(lt_AstNode*, node->array.values, i));
+			elements = ltls_type_union(context->index, elements,
+				analyze_expression(context, *AT(lt_AstNode*, node->array.values, i)));
+
+		/* A mixed literal is dynamic: the array keeps its kind, the element
+		   type stays unknown. */
+		uint32_t alternatives = 0;
+		for (ltls_TypeSet element = elements; element; element = element->next) alternatives++;
+		ltls_index_set_array_element(context->index, node, alternatives == 1 ? elements : 0);
 		type = ltls_type_add(context->index, 0, LTLS_TYPE_ARRAY, node);
-		break;
+	} break;
 
 	case LT_AST_NODE_FN:
 		type = analyze_function(context, node);
