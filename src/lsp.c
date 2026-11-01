@@ -670,13 +670,18 @@ static const ltls_Declaration* resolve_alias(const ltls_Index* index, const ltls
 		target = target->alias;
 		ltls_TypeSet basis = target->types ? target->types : declaration->types;
 		if (!basis || basis->next) continue;
-		if (basis->kind != LTLS_TYPE_CLASS && basis->kind != LTLS_TYPE_INSTANCE) continue;
+		if (basis->kind != LTLS_TYPE_CLASS && basis->kind != LTLS_TYPE_FUNCTION) continue;
 		if (!basis->node) continue;
 
 		for (uint32_t i = 0; i < index->declaration_count; i++)
 		{
 			const ltls_Declaration* candidate = &index->declarations[i];
-			if (candidate->kind != LTLS_DECL_CLASS || candidate->node != basis->node) continue;
+			if (basis->kind == LTLS_TYPE_CLASS)
+			{
+				if (candidate->kind != LTLS_DECL_CLASS || candidate->node != basis->node) continue;
+			}
+			else if (candidate->kind != LTLS_DECL_FUNCTION || candidate->node != basis->node) continue;
+
 			target = candidate;
 			break;
 		}
@@ -1043,9 +1048,10 @@ static yyjson_mut_val* completion_item(yyjson_mut_doc* document, const ltls_Inde
 
 	yyjson_mut_val* item = yyjson_mut_obj(document);
 	yyjson_mut_obj_add_strcpy(document, item, "label", name);
-	yyjson_mut_obj_add_int(document, item, "kind", completion_kind(declaration));
 
 	const ltls_Declaration* shown = resolve_alias(index, declaration);
+	yyjson_mut_obj_add_int(document, item, "kind", completion_kind(shown));
+
 	char* signature = ltls_declaration_signature(index, shown, 0);
 	if (signature)
 	{
