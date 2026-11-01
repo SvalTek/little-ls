@@ -559,6 +559,14 @@ static lt_Token* callee_token(lt_AstNode* callee)
 	return 0;
 }
 
+static uint8_t is_import_expression(ltls_Context* context, lt_AstNode* expression)
+{
+	if (!expression || expression->type != LT_AST_NODE_CALL) return 0;
+	lt_Token* token = callee_token(expression->call.callee);
+	const char* name = token ? token_text(context->index, token) : 0;
+	return name && strcmp(name, "import") == 0;
+}
+
 static const ltls_Declaration* call_declaration(ltls_Context* context, lt_AstNode* call)
 {
 	if (!call || call->type != LT_AST_NODE_CALL) return 0;
@@ -1345,6 +1353,7 @@ static void analyze_statement(ltls_Context* context, lt_AstNode* node)
 		}
 		else if (node->declare.destructure == LT_DESTRUCT_TABLE)
 		{
+			uint8_t imported = is_import_expression(context, node->declare.expr);
 			for (uint32_t i = 0; i < node->declare.entries.length; i++)
 			{
 				lt_DestructureEntry* entry = AT(lt_DestructureEntry, node->declare.entries, i);
@@ -1352,13 +1361,17 @@ static void analyze_statement(ltls_Context* context, lt_AstNode* node)
 				if (!target || !entry->key) continue;
 
 				ltls_TypeSet value = 0;
+				const ltls_Declaration* alias = 0;
 				for (ltls_TypeSet type_set = type; type_set; type_set = type_set->next)
 				{
 					if (type_set->kind != LTLS_TYPE_TABLE) continue;
 					const ltls_Declaration* field =
 						ltls_index_table_field(context->index, type_set->node, entry->key);
-					if (field) value = ltls_type_union(context->index, value, field->types);
+					if (!field) continue;
+					value = ltls_type_union(context->index, value, field->types);
+					if (!alias) alias = field;
 				}
+				if (imported && alias && !target->alias) target->alias = alias;
 				if (value) write_declaration(context, target, value);
 			}
 		}

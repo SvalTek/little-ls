@@ -660,6 +660,35 @@ static void markdown_append_param_doc(ltls_Markdown* markdown, const ltls_Doc* d
 	}
 }
 
+/* Named imports bind locals to the module's export. Follow that link so
+   hover/definition show the class/function instead of "var Alias: Type". */
+static const ltls_Declaration* resolve_alias(const ltls_Index* index, const ltls_Declaration* declaration)
+{
+	const ltls_Declaration* target = declaration;
+	for (uint8_t depth = 0; depth < 3 && target && target->alias; depth++)
+	{
+		target = target->alias;
+		ltls_TypeSet basis = target->types ? target->types : declaration->types;
+		if (!basis || basis->next) continue;
+		if (basis->kind != LTLS_TYPE_CLASS && basis->kind != LTLS_TYPE_FUNCTION) continue;
+		if (!basis->node) continue;
+
+		for (uint32_t i = 0; i < index->declaration_count; i++)
+		{
+			const ltls_Declaration* candidate = &index->declarations[i];
+			if (basis->kind == LTLS_TYPE_CLASS)
+			{
+				if (candidate->kind != LTLS_DECL_CLASS || candidate->node != basis->node) continue;
+			}
+			else if (candidate->kind != LTLS_DECL_FUNCTION || candidate->node != basis->node) continue;
+
+			target = candidate;
+			break;
+		}
+	}
+	return target ? target : declaration;
+}
+
 static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 {
 	ltls_PositionContext* position = context;
@@ -707,6 +736,7 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 	yyjson_mut_val* result = 0;
 	if (declaration)
 	{
+		const ltls_Declaration* shown = resolve_alias(&state.index, declaration);
 		ltls_TypeSet override = 0;
 		if (reference)
 		{
@@ -718,19 +748,19 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 				override = resolved;
 			}
 		}
-		char* signature = ltls_declaration_signature(&state.index, declaration, override);
+		char* signature = ltls_declaration_signature(&state.index, shown, override);
 		ltls_Doc docs;
 		uint8_t has_docs = 0;
 		uint8_t param_docs = 0;
-		if (!declaration->from_doc)
+		if (!shown->from_doc)
 		{
-			uint32_t doc_line = declaration->name->line;
-			if (declaration->kind == LTLS_DECL_PARAM && declaration->node)
-				doc_line = declaration->node->loc.line;
+			uint32_t doc_line = shown->name->line;
+			if (shown->kind == LTLS_DECL_PARAM && shown->node)
+				doc_line = shown->node->loc.line;
 			if (doc_line > 0 && ltls_doc_for_line(&state.analysis.tokens, doc_line, &docs))
 			{
 				has_docs = 1;
-				param_docs = declaration->kind == LTLS_DECL_PARAM;
+				param_docs = shown->kind == LTLS_DECL_PARAM;
 			}
 		}
 
@@ -743,19 +773,19 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 			if (param_docs)
 			{
 				markdown_append_param_doc(&markdown, &docs,
-					ltls_index_token_text(&state.index, declaration->name));
+					ltls_index_token_text(&state.index, shown->name));
 			}
 			else
 			{
-				const char* own_class = declaration->kind == LTLS_DECL_CLASS
-					? ltls_index_token_text(&state.index, declaration->name) : 0;
+				const char* own_class = shown->kind == LTLS_DECL_CLASS
+					? ltls_index_token_text(&state.index, shown->name) : 0;
 				markdown_append_docs(&markdown, &docs, own_class);
 			}
 		}
-		if (declaration->detail)
+		if (shown->detail)
 		{
 			markdown_append(&markdown, "\n\n");
-			markdown_append(&markdown, declaration->detail);
+			markdown_append(&markdown, shown->detail);
 		}
 		if (!markdown.text) markdown_append(&markdown, "");
 
@@ -765,8 +795,11 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 		yyjson_mut_obj_add_strcpy(document, contents, "value", markdown.text);
 		yyjson_mut_obj_add_val(document, result, "contents", contents);
 
-		lt_Span highlight = (reference && (declaration->external || declaration->origin_uri))
-			? reference->token->span : declaration->name->span;
+		lt_Span highlight = declaration->name->span;
+		if (reference && (shown->external || shown->origin_uri))
+			highlight = reference->token->span;
+		else if (reference && (declaration->name->flags & LT_TOKEN_SYNTHETIC))
+			highlight = reference->token->span;
 		yyjson_mut_obj_add_val(document, result, "range",
 			range_object(document, &state.lines, position->document->text, highlight));
 
@@ -790,15 +823,16 @@ static yyjson_mut_val* build_definition(yyjson_mut_doc* document, void* context)
 
 	uint32_t offset = position_to_offset(&state.lines, position->document->text, position->line, position->character);
 	const ltls_Declaration* declaration = ltls_index_resolve(&state.index, offset, 0);
+	const ltls_Declaration* shown = declaration ? resolve_alias(&state.index, declaration) : 0;
 
 	yyjson_mut_val* result = 0;
-	if (declaration && !declaration->external)
+	if (shown && !shown->external)
 	{
-		if (declaration->origin_uri)
+		if (shown->origin_uri)
 		{
-			uint32_t line = declaration->origin_line ? declaration->origin_line - 1 : 0;
-			uint32_t character = declaration->origin_col;
-			uint32_t end = character + declaration->origin_length;
+			uint32_t line = shown->origin_line ? shown->origin_line - 1 : 0;
+			uint32_t character = shown->origin_col;
+			uint32_t end = character + shown->origin_length;
 
 			yyjson_mut_val* start = yyjson_mut_obj(document);
 			yyjson_mut_obj_add_int(document, start, "line", line);
@@ -811,15 +845,15 @@ static yyjson_mut_val* build_definition(yyjson_mut_doc* document, void* context)
 			yyjson_mut_obj_add_val(document, range, "end", stop);
 
 			result = yyjson_mut_obj(document);
-			yyjson_mut_obj_add_strcpy(document, result, "uri", declaration->origin_uri);
+			yyjson_mut_obj_add_strcpy(document, result, "uri", shown->origin_uri);
 			yyjson_mut_obj_add_val(document, result, "range", range);
 		}
-		else if (!(declaration->name->flags & LT_TOKEN_SYNTHETIC))
+		else if (!(shown->name->flags & LT_TOKEN_SYNTHETIC))
 		{
 			result = yyjson_mut_obj(document);
 			yyjson_mut_obj_add_strcpy(document, result, "uri", position->document->uri);
 			yyjson_mut_obj_add_val(document, result, "range",
-				range_object(document, &state.lines, position->document->text, declaration->name->span));
+				range_object(document, &state.lines, position->document->text, shown->name->span));
 		}
 	}
 
@@ -1014,16 +1048,18 @@ static yyjson_mut_val* completion_item(yyjson_mut_doc* document, const ltls_Inde
 
 	yyjson_mut_val* item = yyjson_mut_obj(document);
 	yyjson_mut_obj_add_strcpy(document, item, "label", name);
-	yyjson_mut_obj_add_int(document, item, "kind", completion_kind(declaration));
 
-	char* signature = ltls_declaration_signature(index, declaration, 0);
+	const ltls_Declaration* shown = resolve_alias(index, declaration);
+	yyjson_mut_obj_add_int(document, item, "kind", completion_kind(shown));
+
+	char* signature = ltls_declaration_signature(index, shown, 0);
 	if (signature)
 	{
 		yyjson_mut_obj_add_strcpy(document, item, "detail", signature);
 		free(signature);
 	}
-	if (declaration->detail)
-		yyjson_mut_obj_add_strcpy(document, item, "documentation", declaration->detail);
+	if (shown->detail)
+		yyjson_mut_obj_add_strcpy(document, item, "documentation", shown->detail);
 
 	return item;
 }

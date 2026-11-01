@@ -1030,11 +1030,12 @@ async function main() {
     "  Thing: Thing",
     "  answer: 42",
     "  tags: [\"a\", \"b\"]",
+    "  service: Thing()",
     "}",
     "",
   ].join("\n"));
   const importMainText = [
-    "import { greet, Thing, answer, tags } from \"mod\"",
+    "import { greet, Thing, answer, tags, service } from \"mod\"",
     "var t = Thing()",
     "var g = greet(\"x\")",
     "var first = tags[0]",
@@ -1064,15 +1065,81 @@ async function main() {
   assert.match((await importHover(115, 2, 4)).result.contents.value, /var g: string/);
   assert.match((await importHover(116, 3, 4)).result.contents.value, /var first: string/);
   assert.match((await importHover(117, 5, 14)).result.contents.value, /field answer: number/);
+  assert.match((await importHover(120, 0, 18)).result.contents.value, /class Thing/);
+
+  send({ jsonrpc: "2.0", id: 121, method: "textDocument/definition", params: { textDocument: { uri: importMainUri }, position: { line: 0, character: 18 } } });
+  const bindingDefinition = await waitFor((message) => message.id === 121, "binding definition");
+  assert.ok(bindingDefinition.result.uri.endsWith("/mod.little"), "binding definition should target the class");
+  assert.equal(bindingDefinition.result.range.start.line, 3);
+
+  assert.match((await importHover(122, 0, 10)).result.contents.value, /fn greet\(name\)/);
+  send({ jsonrpc: "2.0", id: 123, method: "textDocument/definition", params: { textDocument: { uri: importMainUri }, position: { line: 0, character: 10 } } });
+  const functionDefinition = await waitFor((message) => message.id === 123, "function binding definition");
+  assert.ok(functionDefinition.result.uri.endsWith("/mod.little"), "function binding should target the function");
+  assert.equal(functionDefinition.result.range.start.line, 0);
+
+  assert.match((await importHover(124, 0, 39)).result.contents.value, /field service: Thing/);
+  send({ jsonrpc: "2.0", id: 125, method: "textDocument/definition", params: { textDocument: { uri: importMainUri }, position: { line: 0, character: 39 } } });
+  const instanceDefinition = await waitFor((message) => message.id === 125, "instance binding definition");
+  assert.ok(instanceDefinition.result.uri.endsWith("/mod.little"), "instance binding should target the export");
+  assert.equal(instanceDefinition.result.range.start.line, 11);
 
   send({ jsonrpc: "2.0", id: 118, method: "textDocument/completion", params: { textDocument: { uri: importMainUri }, position: { line: 5, character: 11 } } });
   const importCompletion = await waitFor((message) => message.id === 118, "module completion");
-  assert.deepEqual(importCompletion.result.items.map((item) => item.label).sort(), ["Thing", "answer", "greet", "tags"]);
+  assert.deepEqual(importCompletion.result.items.map((item) => item.label).sort(), ["Thing", "answer", "greet", "service", "tags"]);
+
+  send({ jsonrpc: "2.0", id: 130, method: "textDocument/completion", params: { textDocument: { uri: importMainUri }, position: { line: 7, character: 0 } } });
+  const bindingCompletion = await waitFor((message) => message.id === 130, "binding completion");
+  assert.equal(bindingCompletion.result.items.find((item) => item.label === "Thing").kind, 7);
+  assert.equal(bindingCompletion.result.items.find((item) => item.label === "greet").kind, 3);
 
   send({ jsonrpc: "2.0", id: 119, method: "textDocument/definition", params: { textDocument: { uri: importMainUri }, position: { line: 5, character: 14 } } });
   const importDefinition = await waitFor((message) => message.id === 119, "module definition");
   assert.ok(importDefinition.result.uri.endsWith("/mod.little"), "definition should target the module");
   assert.equal(importDefinition.result.range.start.line, 9);
+
+  const reexportDir = mkdtempSync(path.join(tmpdir(), "little-ls-"));
+  writeFileSync(path.join(reexportDir, "base.little"), [
+    ";; # Base thing",
+    "class Base {",
+    "  value",
+    "}",
+    "return {",
+    "  Base: Base",
+    "}",
+    "",
+  ].join("\n"));
+  writeFileSync(path.join(reexportDir, "barrel.little"), [
+    "import { Base } from \"base\"",
+    "return { Base: Base }",
+    "",
+  ].join("\n"));
+  const reexportText = [
+    "import { Base } from \"barrel\"",
+    "var b = Base()",
+    "",
+  ].join("\n");
+  const reexportUri = "file:///" + reexportDir.split(path.sep).join("/") + "/consumer.little";
+  writeFileSync(path.join(reexportDir, "consumer.little"), reexportText);
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri: reexportUri, languageId: "little", version: 1, text: reexportText } }
+  });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === reexportUri, "re-export diagnostics");
+
+  async function reexportHover(id, line, character) {
+    send({ jsonrpc: "2.0", id, method: "textDocument/hover", params: { textDocument: { uri: reexportUri }, position: { line, character } } });
+    return waitFor((message) => message.id === id, "re-export hover " + line);
+  }
+  assert.match((await reexportHover(126, 0, 10)).result.contents.value, /class Base/);
+  assert.match((await reexportHover(126, 0, 10)).result.contents.value, /Base thing/);
+  assert.match((await reexportHover(127, 1, 4)).result.contents.value, /var b: Base/);
+
+  send({ jsonrpc: "2.0", id: 128, method: "textDocument/definition", params: { textDocument: { uri: reexportUri }, position: { line: 0, character: 10 } } });
+  const reexportDefinition = await waitFor((message) => message.id === 128, "re-export definition");
+  assert.ok(reexportDefinition.result.uri.endsWith("/base.little"), "definition should target the original module");
+  assert.equal(reexportDefinition.result.range.start.line, 1);
 
   const genericUri = "file:///test/generics.little";
   const genericText = [

@@ -61,6 +61,7 @@ static void add_declaration(ltls_Index* index, lt_Token* name, lt_Span span, lt_
 	declaration.detail = 0;
 	declaration.signature = 0;
 	declaration.signature_owned = 0;
+	declaration.alias = 0;
 	declaration.origin_uri = 0;
 	declaration.origin_line = 0;
 	declaration.origin_col = 0;
@@ -1802,9 +1803,13 @@ static void clone_declaration(ltls_Clone* clone, const ltls_Declaration* declara
 	lt_Token* name = clone_name_token(clone, declaration->name);
 	if (!name) return;
 
+	/* Clone the type first: cloning a class/table/function adds declarations,
+	   which reallocs the declaration table and invalidates cached pointers. */
+	ltls_TypeSet types = clone_types(clone, declaration->types);
+
 	add_declaration(clone->target, name, name->span, 0, owner, 0, declaration->kind, declaration->is_global);
 	ltls_Declaration* copy = &clone->target->declarations[clone->target->declaration_count - 1];
-	copy->types = clone_types(clone, declaration->types);
+	copy->types = types;
 	copy->from_doc = declaration->from_doc;
 	copy->origin_uri = declaration->origin_uri ? copy_text(declaration->origin_uri) : copy_text(clone->origin_uri);
 	copy->origin_line = declaration->origin_uri ? declaration->origin_line : declaration->name->line;
@@ -1846,6 +1851,18 @@ static lt_AstNode* clone_function(ltls_Clone* clone, lt_AstNode* source)
 			tuple->known && tuple->count <= 16);
 	}
 
+	/* Keep the declaration so an imported function resolves to `fn name`, not
+	   to the synthetic export field. */
+	for (uint32_t i = 0; i < clone->source->declaration_count; i++)
+	{
+		const ltls_Declaration* declaration = &clone->source->declarations[i];
+		if (declaration->kind != LTLS_DECL_FUNCTION || !declaration->node) continue;
+		lt_AstNode* node = declaration->node;
+		if (node != source && !(node->type == LT_AST_NODE_DECLARE && node->declare.expr == source)) continue;
+		clone_declaration(clone, declaration, fn);
+		break;
+	}
+
 	return fn;
 }
 
@@ -1853,6 +1870,17 @@ static lt_AstNode* clone_class(ltls_Clone* clone, lt_AstNode* source)
 {
 	lt_AstNode* existing = clone_mapped(clone, source);
 	if (existing) return existing;
+
+	const ltls_Declaration* source_declaration = 0;
+	for (uint32_t i = 0; i < clone->source->declaration_count; i++)
+	{
+		const ltls_Declaration* candidate = &clone->source->declarations[i];
+		if (candidate->kind == LTLS_DECL_CLASS && candidate->node == source)
+		{
+			source_declaration = candidate;
+			break;
+		}
+	}
 
 	lt_AstNode* klass = synthetic_node(clone->target, LT_AST_NODE_CLASS);
 	if (!klass) return 0;
@@ -1864,11 +1892,25 @@ static lt_AstNode* clone_class(ltls_Clone* clone, lt_AstNode* source)
 	add_declaration(clone->target, klass->class_decl.identifier, klass->class_decl.identifier->span, 0,
 		klass, 0, LTLS_DECL_CLASS, 0);
 	ltls_Declaration* declaration = &clone->target->declarations[clone->target->declaration_count - 1];
-	declaration->origin_uri = copy_text(clone->origin_uri);
-	declaration->origin_line = source->class_decl.identifier->line;
-	declaration->origin_col = source->class_decl.identifier->col;
-	declaration->origin_length =
-		(uint16_t)(source->class_decl.identifier->span.end - source->class_decl.identifier->span.start);
+	if (source_declaration && source_declaration->origin_uri)
+	{
+		/* A re-exported class was already cloned once: keep the original
+		   module location and docs instead of the synthetic identifier. */
+		declaration->origin_uri = copy_text(source_declaration->origin_uri);
+		declaration->origin_line = source_declaration->origin_line;
+		declaration->origin_col = source_declaration->origin_col;
+		declaration->origin_length = source_declaration->origin_length;
+		declaration->detail = source_declaration->detail ? copy_text(source_declaration->detail) : 0;
+	}
+	else
+	{
+		declaration->origin_uri = copy_text(clone->origin_uri);
+		declaration->origin_line = source->class_decl.identifier->line;
+		declaration->origin_col = source->class_decl.identifier->col;
+		declaration->origin_length =
+			(uint16_t)(source->class_decl.identifier->span.end - source->class_decl.identifier->span.start);
+		declaration->detail = clone_docs(clone, source->class_decl.identifier->line);
+	}
 
 	if (source->class_decl.superclass)
 	{

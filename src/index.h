@@ -40,7 +40,9 @@ typedef enum {
 	LTLS_DECL_PROPERTY
 } ltls_DeclKind;
 
-typedef struct {
+typedef struct ltls_Declaration ltls_Declaration;
+
+struct ltls_Declaration {
 	lt_Token* name;
 	lt_Span span;
 	lt_Scope* scope;
@@ -53,6 +55,7 @@ typedef struct {
 	char* detail;       /* doc description for synthetic members */
 	const char* signature; /* display signature override (std symbols) */
 	char* signature_owned; /* cloned signatures are owned */
+	const ltls_Declaration* alias; /* import binding target */
 	char* origin_uri;   /* file a cloned declaration came from */
 	uint16_t origin_line, origin_col;
 	uint16_t origin_length;
@@ -61,7 +64,7 @@ typedef struct {
 	uint8_t is_global;
 	uint8_t from_doc;
 	uint8_t external;
-} ltls_Declaration;
+};
 
 typedef struct {
 	lt_Token* token;
