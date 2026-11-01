@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "little.h"
+#include "little_frontend.h"
 
 typedef struct {
 	char* type;

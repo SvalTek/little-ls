@@ -2,6 +2,7 @@
    the module, analyses the file and clones its exported value into the current
    index so hover, completion and definition work across files. */
 #include "index.h"
+#include "little_api.h"
 
 #include <stdio.h>
 #include <stdlib.h>

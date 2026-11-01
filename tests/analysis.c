@@ -4,7 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "little.h"
+#include "little_frontend.h"
+#include "little_api.h"
 
 static int failures = 0;
 

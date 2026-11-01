@@ -8,9 +8,10 @@ TypeScript. The VS Code extension is a thin client that launches the binary
 over stdio (`little.server.path` or `LITTLE_LS_PATH`). The Little CLI and
 runtime are unchanged by the server.
 
-The server links only the analysis-capable core (`little.c`,
-`little_analysis.c`, `little_buffer.c`, `little_common.c`, `little_async.c`)
-and yyjson; the standard library is not linked because nothing is executed.
+The server uses `little_frontend.h` for frontend types and analysis, and
+`little_api.h` for VM lifecycle calls. Its build and C tests consume the
+analysis-capable source set in `little/scripts/sources.ps1`, plus yyjson.
+The frontend still uses a VM; the standard library is not linked.
 
 ## Source layout
 
