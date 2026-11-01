@@ -2,7 +2,7 @@ name: Build, test, and release
 
 on:
   pull_request:
-    branches: [develop, main]
+    branches: [develop]
   push:
     branches: [develop, main]
     tags: ["v*"]
@@ -95,7 +95,7 @@ jobs:
   release:
     name: Publish release
     needs: [build-linux, build-windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref_type == 'tag' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -110,11 +110,38 @@ jobs:
         with:
           name: little-ls-windows-x64
           path: release
-      - name: Attach binaries
+      - name: Choose release
+        id: release
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            echo "kind=version" >> "$GITHUB_OUTPUT"
+            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "title=$REF_NAME" >> "$GITHUB_OUTPUT"
+          elif [ "$REF_NAME" = "main" ]; then
+            echo "kind=main" >> "$GITHUB_OUTPUT"
+            echo "tag=main" >> "$GITHUB_OUTPUT"
+            echo "title=Main release build" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=testing" >> "$GITHUB_OUTPUT"
+            echo "tag=testing" >> "$GITHUB_OUTPUT"
+            echo "title=Testing build" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish binaries
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          KIND: ${{ steps.release.outputs.kind }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TITLE: ${{ steps.release.outputs.title }}
         run: |
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
-          gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+          elif [ "$KIND" = "version" ]; then
+            gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --title "$TITLE" --generate-notes
+          elif [ "$KIND" = "testing" ]; then
+            gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes 'Automated testing build.' --prerelease
+          else
+            gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes 'Automated main build.'
+          fi
