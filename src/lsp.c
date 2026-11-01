@@ -10,6 +10,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#include <strings.h>
+#endif
+
 #define LTLS_NAME "little-ls"
 #define LTLS_VERSION "0.1.0"
 
