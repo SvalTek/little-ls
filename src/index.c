@@ -57,6 +57,7 @@ static void add_declaration(ltls_Index* index, lt_Token* name, lt_Span span, lt_
 	declaration.member = member;
 	declaration.types = 0;
 	declaration.annotation = 0;
+	declaration.default_value = 0;
 	declaration.returns_text = 0;
 	declaration.detail = 0;
 	declaration.signature = 0;
@@ -637,7 +638,7 @@ lt_AstNode* ltls_index_struct(const ltls_Index* index, const char* name)
 {
 	if (!index || !name) return 0;
 	for (uint32_t i = 0; i < index->struct_count; i++)
-		if (strcmp(index->structs[i].name, name) == 0) return index->structs[i].node;
+		if (index->structs[i].visible && strcmp(index->structs[i].name, name) == 0) return index->structs[i].node;
 	return 0;
 }
 
@@ -668,6 +669,7 @@ static void build_struct(ltls_Index* index, ltls_Doc* doc)
 	index->structs = entries;
 	index->structs[index->struct_count].name = name;
 	index->structs[index->struct_count].node = table;
+	index->structs[index->struct_count].visible = 1;
 	index->struct_count++;
 
 	for (uint32_t f = 0; f < doc->field_count; f++)
@@ -681,6 +683,7 @@ static void build_struct(ltls_Index* index, ltls_Doc* doc)
 		declaration->annotation = copy_text(field->type);
 		if (field->description && field->description[0]) declaration->detail = copy_text(field->description);
 		declaration->optional = field->default_value != 0;
+		declaration->default_value = copy_text(field->default_value);
 		declaration->from_doc = 1;
 	}
 }
@@ -868,6 +871,7 @@ void ltls_index_free(ltls_Index* index)
 	{
 		if (index->declarations[i].external) continue;
 		free(index->declarations[i].annotation);
+		free(index->declarations[i].default_value);
 		free(index->declarations[i].detail);
 		free(index->declarations[i].signature_owned);
 		free(index->declarations[i].origin_uri);
@@ -1177,10 +1181,12 @@ static lt_AstNode* superclass_node(const ltls_Index* index, lt_AstNode* class_no
 	for (uint32_t i = 0; i < index->declaration_count; i++)
 	{
 		const ltls_Declaration* declaration = &index->declarations[i];
-		if (declaration->kind != LTLS_DECL_CLASS || !declaration->node) continue;
-
 		const char* candidate = token_text(index, declaration->name);
-		if (candidate && strcmp(candidate, name) == 0) return declaration->node;
+		if (!candidate || strcmp(candidate, name) != 0) continue;
+		if (declaration->kind == LTLS_DECL_CLASS && declaration->node) return declaration->node;
+		if (declaration->alias && declaration->types && !declaration->types->next &&
+		    declaration->types->kind == LTLS_TYPE_CLASS)
+			return declaration->types->node;
 	}
 	return 0;
 }
@@ -1496,6 +1502,45 @@ lt_AstNode* ltls_index_function_node(const ltls_Declaration* declaration)
 	return function_node(declaration);
 }
 
+const ltls_Declaration* ltls_index_constructor(const ltls_Index* index, lt_AstNode* class_node)
+{
+	if (!class_node || class_node->type != LT_AST_NODE_CLASS) return 0;
+	class_node = ltls_index_class_base(index, class_node);
+	for (uint8_t depth = 0; class_node && depth < 8; depth++)
+	{
+		for (uint32_t i = 0; i < index->declaration_count; i++)
+		{
+			const ltls_Declaration* member = &index->declarations[i];
+			if (member->node != class_node || member->kind != LTLS_DECL_METHOD) continue;
+			const char* name = token_text(index, member->name);
+			if (name && strcmp(name, "constructor") == 0) return member;
+		}
+		class_node = superclass_node(index, class_node);
+	}
+	return 0;
+}
+
+const ltls_Declaration* ltls_index_parameter(const ltls_Index* index, const ltls_Declaration* declaration, uint32_t position)
+{
+	const ltls_Declaration* callable = declaration && declaration->kind == LTLS_DECL_CLASS
+		? ltls_index_constructor(index, declaration->node) : 0;
+	if (!callable) callable = declaration;
+	lt_AstNode* fn = callable ? function_node(callable) : 0;
+	if (!fn) return 0;
+	uint32_t visible = 0;
+	for (uint32_t i = 0; i <= LT_MAX_FUNCTION_PARAMS && fn->fn.args[i]; i++)
+	{
+		lt_Token* token = fn->fn.args[i];
+		if (is_synthetic(token) && fn->fn.scope) continue;
+		if (visible++ != position) continue;
+		for (uint32_t j = 0; j < index->declaration_count; j++)
+			if (index->declarations[j].kind == LTLS_DECL_PARAM && index->declarations[j].name == token)
+				return &index->declarations[j];
+		return 0;
+	}
+	return 0;
+}
+
 const ltls_Declaration* ltls_index_resolve(const ltls_Index* index, uint32_t offset, const ltls_Reference** reference)
 {
 	if (reference) *reference = 0;
@@ -1549,6 +1594,7 @@ static void string_append(ltls_String* string, const char* text)
 
 static lt_AstNode* function_node(const ltls_Declaration* declaration)
 {
+	if (declaration->function_node) return declaration->function_node;
 	lt_AstNode* node = declaration->node;
 	if (declaration->member)
 	{
@@ -1730,8 +1776,8 @@ typedef struct {
 	uint32_t node_count;
 } ltls_Clone;
 
-static lt_AstNode* clone_node(ltls_Clone* clone, lt_AstNode* source, lt_AstNodeType type);
 static ltls_TypeSet clone_types(ltls_Clone* clone, ltls_TypeSet types);
+static lt_AstNode* clone_function(ltls_Clone* clone, lt_AstNode* source);
 
 static lt_AstNode* clone_mapped(ltls_Clone* clone, lt_AstNode* source)
 {
@@ -1806,11 +1852,17 @@ static void clone_declaration(ltls_Clone* clone, const ltls_Declaration* declara
 	/* Clone the type first: cloning a class/table/function adds declarations,
 	   which reallocs the declaration table and invalidates cached pointers. */
 	ltls_TypeSet types = clone_types(clone, declaration->types);
+	lt_AstNode* source_fn = function_node(declaration);
+	lt_AstNode* fn = source_fn ? clone_function(clone, source_fn) : 0;
 
 	add_declaration(clone->target, name, name->span, 0, owner, 0, declaration->kind, declaration->is_global);
 	ltls_Declaration* copy = &clone->target->declarations[clone->target->declaration_count - 1];
 	copy->types = types;
+	copy->function_node = fn;
 	copy->from_doc = declaration->from_doc;
+	copy->optional = declaration->optional;
+	copy->annotation = declaration->annotation ? copy_text(declaration->annotation) : 0;
+	copy->default_value = declaration->default_value ? copy_text(declaration->default_value) : 0;
 	copy->origin_uri = declaration->origin_uri ? copy_text(declaration->origin_uri) : copy_text(clone->origin_uri);
 	copy->origin_line = declaration->origin_uri ? declaration->origin_line : declaration->name->line;
 	copy->origin_col = declaration->origin_uri ? declaration->origin_col : declaration->name->col;
@@ -1836,6 +1888,34 @@ static lt_AstNode* clone_function(ltls_Clone* clone, lt_AstNode* source)
 	lt_AstNode* fn = synthetic_node(clone->target, LT_AST_NODE_FN);
 	if (!fn) return 0;
 	clone_map(clone, source, fn);
+	uint32_t generic_count = 0;
+	const char* const* generics = ltls_index_generics(clone->source, source, &generic_count);
+	if (generics && generic_count)
+		ltls_index_set_generics(clone->target, fn, (char**)generics, generic_count);
+	for (uint32_t i = 0, out = 0; i <= LT_MAX_FUNCTION_PARAMS; i++)
+	{
+		lt_Token* argument = source->fn.args[i];
+		if (!argument) break;
+		if (is_synthetic(argument) && source->fn.scope) continue;
+		lt_Token* name = clone_name_token(clone, argument);
+		if (!name) continue;
+		fn->fn.args[out++] = name;
+		for (uint32_t j = 0; j < clone->source->declaration_count; j++)
+		{
+			const ltls_Declaration* param = &clone->source->declarations[j];
+			if (param->kind != LTLS_DECL_PARAM || param->name != argument) continue;
+			ltls_TypeSet type = clone_types(clone, param->types);
+			add_declaration(clone->target, name, name->span, 0, fn, 0, LTLS_DECL_PARAM, 0);
+			ltls_Declaration* copy = &clone->target->declarations[clone->target->declaration_count - 1];
+			copy->types = type;
+			copy->annotation = param->annotation ? copy_text(param->annotation) : 0;
+			copy->default_value = param->default_value ? copy_text(param->default_value) : 0;
+			copy->detail = param->detail ? copy_text(param->detail) : 0;
+			copy->optional = param->optional;
+			copy->origin_uri = copy_text(param->origin_uri ? param->origin_uri : clone->origin_uri);
+			break;
+		}
+	}
 
 	ltls_TypeSet returns = clone_types(clone, ltls_index_returns(clone->source, source));
 	if (returns) ltls_index_add_return(clone->target, fn, returns);
@@ -1885,6 +1965,10 @@ static lt_AstNode* clone_class(ltls_Clone* clone, lt_AstNode* source)
 	lt_AstNode* klass = synthetic_node(clone->target, LT_AST_NODE_CLASS);
 	if (!klass) return 0;
 	clone_map(clone, source, klass);
+	uint32_t generic_count = 0;
+	const char* const* generics = ltls_index_generics(clone->source, source, &generic_count);
+	if (generics && generic_count)
+		ltls_index_set_generics(clone->target, klass, (char**)generics, generic_count);
 
 	klass->class_decl.identifier = clone_name_token(clone, source->class_decl.identifier);
 	if (!klass->class_decl.identifier) return klass;
@@ -1949,6 +2033,23 @@ static lt_AstNode* clone_table(ltls_Clone* clone, lt_AstNode* source)
 	lt_AstNode* table = synthetic_node(clone->target, LT_AST_NODE_TABLE);
 	if (!table) return 0;
 	clone_map(clone, source, table);
+	const char* struct_name = ltls_index_struct_name(clone->source, source);
+	if (struct_name)
+	{
+		char* name = copy_text(struct_name);
+		ltls_Struct* entries = realloc(clone->target->structs,
+			sizeof(ltls_Struct) * (clone->target->struct_count + 1));
+		if (entries && name)
+		{
+			clone->target->structs = entries;
+			entries[clone->target->struct_count++] = (ltls_Struct){ name, table, 0 };
+		}
+		else
+		{
+			if (entries) clone->target->structs = entries;
+			free(name);
+		}
+	}
 
 	for (uint32_t i = 0; i < clone->source->declaration_count; i++)
 	{
@@ -1994,6 +2095,10 @@ static ltls_TypeSet clone_types(ltls_Clone* clone, ltls_TypeSet types)
 				ltls_index_array_element(clone->source, type->node));
 			result = ltls_type_union(clone->target, result, ltls_type_array(clone->target, element));
 		} break;
+
+		case LTLS_TYPE_PARAM:
+			if (type->name) result = ltls_type_union(clone->target, result, ltls_type_param(clone->target, type->name));
+			break;
 
 		default:
 			result = ltls_type_add(clone->target, result, type->kind, 0);

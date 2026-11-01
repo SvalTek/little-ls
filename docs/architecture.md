@@ -64,6 +64,9 @@ memory.
   index. Arrays and return streams are side tables keyed by node.
 - Imported declarations are clones into the current index, so every consumer
   (hover, completion, references) sees one uniform declaration table.
+- Callable clones preserve parameter declarations, annotations and types, and
+  clone referenced table shapes with their field metadata. Imported struct
+  names are retained for display without entering local annotation scope.
 
 ## Type pass
 

@@ -2,7 +2,7 @@
 // Run with: node tests/lsp.mjs <path-to-little-ls>
 import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -124,6 +124,30 @@ async function main() {
   assert.equal(symbols.result[0].selectionRange.start.character, 4);
   assert.equal(symbols.result[0].selectionRange.end.character, 5);
 
+  // A missing extensionless import must not kill the server, and directory
+  // modules must still resolve after the .little candidate is absent.
+  const missingImportDir = mkdtempSync(path.join(tmpdir(), "little-ls-missing-import-"));
+  mkdirSync(path.join(missingImportDir, "providers"));
+  mkdirSync(path.join(missingImportDir, "package"));
+  writeFileSync(path.join(missingImportDir, "package", "init.little"), 'return { label: "directory module" }\n');
+  const missingImportText = [
+    'import { adaptors } from "../not-created"',
+    'var absent = import "../also-missing.little"',
+    'var package = import "../package"',
+    'var label = package.label',
+    '',
+  ].join("\n");
+  const missingImportUri = "file:///" + missingImportDir.split(path.sep).join("/") + "/providers/main.little";
+  writeFileSync(path.join(missingImportDir, "providers", "main.little"), missingImportText);
+  send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: missingImportUri, languageId: "little", version: 1, text: missingImportText } } });
+  const missingImportDiagnostics = await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === missingImportUri, "missing import diagnostics");
+  assert.deepEqual(missingImportDiagnostics.params.diagnostics, []);
+  send({ jsonrpc: "2.0", id: 301, method: "textDocument/hover", params: { textDocument: { uri: missingImportUri }, position: { line: 3, character: 5 } } });
+  const directoryImport = await waitFor((message) => message.id === 301, "directory import hover");
+  assert.match(directoryImport.result.contents.value, /var label: string/);
+  send({ jsonrpc: "2.0", id: 302, method: "textDocument/documentSymbol", params: { textDocument: { uri: missingImportUri } } });
+  assert.ok((await waitFor((message) => message.id === 302, "symbols after missing imports")).result.some((symbol) => symbol.name === "label"));
+
   const classUri = "file:///test/klass.little";
   const classSource = "class Point {\n  x\n  length() {\n    return 1\n  }\n}\n";
   send({
@@ -193,7 +217,7 @@ async function main() {
 
   send({ jsonrpc: "2.0", id: 6, method: "textDocument/hover", params: { textDocument: { uri: docsUri }, position: { line: 8, character: 12 } } });
   const functionHover = await waitFor((message) => message.id === 6, "function hover");
-  assert.match(functionHover.result.contents.value, /fn increment\(amount\)/);
+  assert.match(functionHover.result.contents.value, /fn increment\(amount: number\)/);
   assert.match(functionHover.result.contents.value, /Adds one to a counter/);
   assert.match(functionHover.result.contents.value, /how much to add/);
 
@@ -1413,6 +1437,7 @@ async function main() {
     "  constructor(@name, config) {",
     "  }",
     "}",
+    'var provider = LLMProvider("x", {})',
     "",
   ].join("\n");
   send({
@@ -1438,6 +1463,195 @@ async function main() {
   assert.match(configHover.result.contents.value, /Provider Config/);
   assert.doesNotMatch(configHover.result.contents.value, /Name this Provider/);
   assert.doesNotMatch(configHover.result.contents.value, /create a new LLMProvider/);
+  const localConstructorHover = await paramHover(207, 11, 17);
+  assert.match(localConstructorHover.result.contents.value, /class LLMProvider\(name: string, config: LLMProviderOpts\)/);
+  assert.match(localConstructorHover.result.contents.value, /Provider Config/);
+  send({ jsonrpc: "2.0", id: 208, method: "textDocument/signatureHelp", params: { textDocument: { uri: paramUri }, position: { line: 11, character: 32 } } });
+  const localConstructorCall = await waitFor((message) => message.id === 208, "local constructor signature");
+  assert.match(localConstructorCall.result.signatures[0].parameters[1].documentation, /Provider Config\n- field baseUrl: string/);
+
+  const constructorDir = mkdtempSync(path.join(tmpdir(), "little-ls-constructor-"));
+  writeFileSync(path.join(constructorDir, "provider.little"), [
+    ";; @struct AuthOpts",
+    ";; @field string key API key",
+    "",
+    ";; @struct LLMProviderOpts",
+    ";; @field string baseUrl Provider URL",
+    ";; @field string token Provider token",
+    ";; @field AuthOpts auth [none] Authentication",
+    "",
+    ";; Provider class",
+    "class LLMProvider {",
+    "  ;; Create a provider",
+    "  ;; @param string name Provider name",
+    "  ;; @param LLMProviderOpts config Provider config",
+    "  constructor(@name, config) {}",
+    "  ;; @param LLMProviderOpts config Method options",
+    "  configure(config) {}",
+    "}",
+    ";; @param LLMProviderOpts config [none] Connection options",
+    "fn connect(config) {}",
+    ";; @generic T",
+    ";; @param T value",
+    ";; @return T",
+    "fn identity(value) { return value }",
+    "return { Provider: LLMProvider connect: connect identity: identity }",
+    "",
+  ].join("\n"));
+  const constructorText = [
+    'import { Provider, connect } from "provider"',
+    'var mod = import "provider"',
+    'var p = Provider("x", {})',
+    'var q = mod.Provider("x", {})',
+    'class Child extends Provider {}',
+    'var c = Child("x", {})',
+    ';; @param string value Local value',
+    'fn local(value) {}',
+    'local("x")',
+    'Provider("x", {',
+    '  ',
+    '})',
+    'connect({',
+    '  ',
+    '})',
+    'mod.Provider("x", {',
+    '  ',
+    '})',
+    'p:configure({',
+    '  ',
+    '})',
+    'Provider("x", {',
+    '  auth: {',
+    '    ',
+    '  }',
+    '})',
+    '',
+  ].join("\n");
+  const constructorUri = "file:///" + constructorDir.split(path.sep).join("/") + "/main.little";
+  writeFileSync(path.join(constructorDir, "main.little"), constructorText);
+  send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: constructorUri, languageId: "little", version: 1, text: constructorText } } });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === constructorUri, "constructor diagnostics");
+  async function constructorRequest(id, method, line, character) {
+    send({ jsonrpc: "2.0", id, method: "textDocument/" + method, params: { textDocument: { uri: constructorUri }, position: { line, character } } });
+    return (await waitFor((message) => message.id === id, method + " constructor")).result;
+  }
+  const constructorHover = await constructorRequest(201, "hover", 2, 10);
+  assert.match(constructorHover.contents.value, /class LLMProvider\(name: string, config: LLMProviderOpts\)/);
+  assert.match(constructorHover.contents.value, /Provider name/);
+  const constructors = await constructorRequest(202, "completion", 9, 0);
+  assert.match(constructors.items.find((item) => item.label === "Provider").detail, /class LLMProvider\(name: string, config: LLMProviderOpts\)/);
+  assert.match(constructors.items.find((item) => item.label === "Provider").documentation.value, /Provider config/);
+  assert.match(constructors.items.find((item) => item.label === "local").documentation.value, /Local value/);
+  const constructorCall = await constructorRequest(203, "signatureHelp", 2, 21);
+  assert.equal(constructorCall.signatures[0].label, "class LLMProvider(name: string, config: LLMProviderOpts)");
+  assert.deepEqual(constructorCall.signatures[0].parameters.map((p) => p.label), ["name: string", "config: LLMProviderOpts"]);
+  assert.equal(constructorCall.signatures[0].parameters[0].documentation, "Provider name");
+  assert.equal(constructorCall.activeParameter, 1);
+  assert.match((await constructorRequest(204, "signatureHelp", 3, 25)).signatures[0].label, /\(name: string, config: LLMProviderOpts\)/);
+  assert.match((await constructorRequest(205, "signatureHelp", 5, 18)).signatures[0].label, /class Child\(name: string, config: LLMProviderOpts\)/);
+  assert.equal((await constructorRequest(206, "signatureHelp", 8, 7)).signatures[0].parameters[0].documentation, "Local value");
+  for (const [id, line] of [[209, 10], [210, 13], [211, 16], [215, 19]]) {
+    const fields = await constructorRequest(id, "completion", line, 2);
+    assert.deepEqual(fields.items.map((item) => item.label).sort(), ["auth", "baseUrl", "token"]);
+    assert.match(fields.items.find((item) => item.label === "baseUrl").detail, /string/);
+    assert.match(fields.items.find((item) => item.label === "baseUrl").documentation.value, /Provider URL/);
+    assert.match(fields.items.find((item) => item.label === "auth").documentation.value, /Default: `none`/);
+  }
+  const connectCall = await constructorRequest(212, "signatureHelp", 12, 8);
+  assert.match(connectCall.signatures[0].label, /config: LLMProviderOpts/);
+  assert.match(connectCall.signatures[0].parameters[0].documentation, /Default: none/);
+  assert.match(constructorCall.signatures[0].parameters[1].documentation, /baseUrl: string.*Provider URL/);
+  assert.match(constructorCall.signatures[0].parameters[1].documentation, /auth: AuthOpts.*default: none/);
+  const unfinishedText = 'import { Provider } from "provider"\nProvider("x", {\n  ba';
+  const unfinishedUri = "file:///" + constructorDir.split(path.sep).join("/") + "/unfinished.little";
+  writeFileSync(path.join(constructorDir, "unfinished.little"), unfinishedText);
+  send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: unfinishedUri, languageId: "little", version: 1, text: unfinishedText } } });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === unfinishedUri, "unfinished constructor diagnostics");
+  send({ jsonrpc: "2.0", id: 213, method: "textDocument/completion", params: { textDocument: { uri: unfinishedUri }, position: { line: 2, character: 4 } } });
+  const unfinishedFields = (await waitFor((message) => message.id === 213, "unfinished constructor fields")).result.items;
+  assert.deepEqual(unfinishedFields.map((item) => item.label), ["baseUrl"]);
+  assert.equal(unfinishedFields[0].insertText, "baseUrl: ");
+  const unfinishedMethodText = 'import { Provider } from "provider"\nvar p = Provider("x", {})\np:configure({\n  to';
+  const unfinishedMethodUri = "file:///" + constructorDir.split(path.sep).join("/") + "/unfinished-method.little";
+  writeFileSync(path.join(constructorDir, "unfinished-method.little"), unfinishedMethodText);
+  send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: unfinishedMethodUri, languageId: "little", version: 1, text: unfinishedMethodText } } });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === unfinishedMethodUri, "unfinished method diagnostics");
+  send({ jsonrpc: "2.0", id: 222, method: "textDocument/completion", params: { textDocument: { uri: unfinishedMethodUri }, position: { line: 3, character: 4 } } });
+  assert.deepEqual((await waitFor((message) => message.id === 222, "unfinished method fields")).result.items.map((item) => item.label), ["token"]);
+  const usedText = 'import { Provider } from "provider"\nProvider("x", {\n  baseUrl: "x"\n  \n})';
+  const usedUri = "file:///" + constructorDir.split(path.sep).join("/") + "/used.little";
+  writeFileSync(path.join(constructorDir, "used.little"), usedText);
+  send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: usedUri, languageId: "little", version: 1, text: usedText } } });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === usedUri, "used field diagnostics");
+  send({ jsonrpc: "2.0", id: 214, method: "textDocument/completion", params: { textDocument: { uri: usedUri }, position: { line: 3, character: 2 } } });
+  assert.deepEqual((await waitFor((message) => message.id === 214, "remaining fields")).result.items.map((item) => item.label).sort(), ["auth", "token"]);
+  writeFileSync(path.join(constructorDir, "barrel.little"), 'import { Provider } from "provider"\nreturn { Provider: Provider }\n');
+  const reexportConstructorText = 'import { Provider } from "barrel"\nProvider("x", {\n  \n})';
+  const reexportConstructorUri = "file:///" + constructorDir.split(path.sep).join("/") + "/reexport.little";
+  writeFileSync(path.join(constructorDir, "reexport.little"), reexportConstructorText);
+  send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: reexportConstructorUri, languageId: "little", version: 1, text: reexportConstructorText } } });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === reexportConstructorUri, "re-exported constructor diagnostics");
+  send({ jsonrpc: "2.0", id: 216, method: "textDocument/completion", params: { textDocument: { uri: reexportConstructorUri }, position: { line: 2, character: 2 } } });
+  assert.deepEqual((await waitFor((message) => message.id === 216, "re-exported constructor fields")).result.items.map((item) => item.label).sort(), ["auth", "baseUrl", "token"]);
+  assert.deepEqual((await constructorRequest(217, "completion", 23, 4)).items.map((item) => item.label), ["key"]);
+  const importedTypeText = [
+    'import { Provider, connect } from "provider"',
+    'Provider("x", { baseUrl: "url" token: "token" })',
+    'connect({ baseUrl: "url" token: "token" })',
+    'Provider("x", { baseUrl: 42 token: "token" })',
+    'connect({ baseUrl: 42 token: "token" })',
+    'class Child extends Provider {}',
+    'Child("x", { baseUrl: 42 token: "token" })',
+  ].join("\n");
+  const importedTypeUri = "file:///" + constructorDir.split(path.sep).join("/") + "/typed.little";
+  writeFileSync(path.join(constructorDir, "typed.little"), importedTypeText);
+  send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: importedTypeUri, languageId: "little", version: 1, text: importedTypeText } } });
+  const importedDiagnostics = (await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === importedTypeUri, "imported type diagnostics")).params.diagnostics;
+  assert.deepEqual(importedDiagnostics.map((diagnostic) => diagnostic.range.start.line), [3, 4, 6]);
+  assert.ok(importedDiagnostics.every((diagnostic) => /expected LLMProviderOpts/.test(diagnostic.message)));
+  const importedGenericText = 'import { identity } from "provider"\nvar result = identity(42)\nio.print(result)\n';
+  const importedGenericUri = "file:///" + constructorDir.split(path.sep).join("/") + "/generic.little";
+  writeFileSync(path.join(constructorDir, "generic.little"), importedGenericText);
+  send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: importedGenericUri, languageId: "little", version: 1, text: importedGenericText } } });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === importedGenericUri, "imported generic diagnostics");
+  send({ jsonrpc: "2.0", id: 218, method: "textDocument/hover", params: { textDocument: { uri: importedGenericUri }, position: { line: 2, character: 10 } } });
+  assert.match((await waitFor((message) => message.id === 218, "imported generic hover")).result.contents.value, /var result: number/);
+  const collisionText = [
+    ';; @struct LLMProviderOpts',
+    ';; @field number localOnly',
+    '',
+    'import { Provider } from "provider"',
+    ';; @param LLMProviderOpts config',
+    'fn localOptions(config) {}',
+    'Provider("x", {',
+    '  ',
+    '})',
+    'localOptions({',
+    '  ',
+    '})',
+    ';; @param MissingType arg',
+    'fn unknown(arg) {}',
+    'unknown()',
+    ';; @param { host: string, port: number } config',
+    'fn inlineOptions(config) {}',
+    'inlineOptions({',
+    '  ',
+    '})',
+  ].join("\n");
+  const collisionUri = "file:///" + constructorDir.split(path.sep).join("/") + "/collision.little";
+  writeFileSync(path.join(constructorDir, "collision.little"), collisionText);
+  send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: collisionUri, languageId: "little", version: 1, text: collisionText } } });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === collisionUri, "shape name collision diagnostics");
+  for (const [id, line, labels] of [[219, 7, ["auth", "baseUrl", "token"]], [220, 10, ["localOnly"]]]) {
+    send({ jsonrpc: "2.0", id, method: "textDocument/completion", params: { textDocument: { uri: collisionUri }, position: { line, character: 2 } } });
+    assert.deepEqual((await waitFor((message) => message.id === id, "shape collision completion")).result.items.map((item) => item.label).sort(), labels);
+  }
+  send({ jsonrpc: "2.0", id: 221, method: "textDocument/signatureHelp", params: { textDocument: { uri: collisionUri }, position: { line: 14, character: 8 } } });
+  assert.match((await waitFor((message) => message.id === 221, "unresolved annotation signature")).result.signatures[0].label, /arg: MissingType/);
+  send({ jsonrpc: "2.0", id: 223, method: "textDocument/completion", params: { textDocument: { uri: collisionUri }, position: { line: 18, character: 2 } } });
+  assert.deepEqual((await waitFor((message) => message.id === 223, "anonymous shape completion")).result.items.map((item) => item.label).sort(), ["host", "port"]);
+  send({ jsonrpc: "2.0", id: 224, method: "textDocument/signatureHelp", params: { textDocument: { uri: collisionUri }, position: { line: 17, character: 14 } } });
+  assert.match((await waitFor((message) => message.id === 224, "anonymous shape signature")).result.signatures[0].label, /config: \{ host: string, port: number \}/);
 
   send({ jsonrpc: "2.0", id: 69, method: "textDocument/hover", params: { textDocument: { uri: tableHoverUri }, position: { line: 3, character: 14 } } });
   const tableThisTarget = await waitFor((message) => message.id === 69, "table this target hover");

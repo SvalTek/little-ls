@@ -51,6 +51,7 @@ struct ltls_Declaration {
 	const lt_ClassMember* member;
 	ltls_TypeSet types;
 	char* annotation;   /* field type text from a doc shape */
+	char* default_value; /* documented default, not a runtime initializer */
 	const char* returns_text; /* return type text for standard library functions */
 	char* detail;       /* doc description for synthetic members */
 	const char* signature; /* display signature override (std symbols) */
@@ -105,6 +106,7 @@ typedef struct {
 typedef struct {
 	char* name;
 	lt_AstNode* node;
+	uint8_t visible; /* local annotations can resolve this name */
 } ltls_Struct;
 
 typedef struct {
@@ -252,6 +254,11 @@ const ltls_Tuple* ltls_index_tuple(const ltls_Index* index, lt_AstNode* node);
 
 /* The FN node for a declaration, when it declares one. */
 lt_AstNode* ltls_index_function_node(const ltls_Declaration* declaration);
+
+/* Callable metadata, including an inherited constructor for a class.
+   Parameter positions omit the implicit class receiver. */
+const ltls_Declaration* ltls_index_constructor(const ltls_Index* index, lt_AstNode* class_node);
+const ltls_Declaration* ltls_index_parameter(const ltls_Index* index, const ltls_Declaration* declaration, uint32_t position);
 
 /* Clones the exported value of an analysed module into this index. */
 ltls_TypeSet ltls_index_clone_export(ltls_Index* index, const ltls_Index* source,

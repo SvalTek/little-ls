@@ -293,6 +293,9 @@ exports `true`. The server clones the exported value into the current index:
 - tables: field declarations, including functions and nested tables;
 - classes: the class, its members and resolved superclass chain;
 - functions: signature, docs, scalar return type and return stream;
+- callable parameters: annotations, descriptions, documented defaults,
+  inferred types, generic names, and referenced named and structural table
+  shapes, including field types, descriptions and defaults;
 - arrays: element type;
 - structural shapes and unions.
 
@@ -310,4 +313,5 @@ document. Diagnostics inside imported modules are not published.
 
 Imported documentation is copied into the cloned declaration's detail text
 (description and `- name: text` parameter bullets), not rendered from a live
-doc block.
+doc block. Imported struct names remain attached to their cloned shapes for
+display; they do not introduce names into the importing file's annotation scope.
