@@ -914,6 +914,7 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 		if (type->kind == LTLS_TYPE_FUNCTION)
 		{
 			lt_AstNode* fn = type->node;
+			if (!fn) continue;
 			uint32_t generic_count = 0;
 			const char* const* names = ltls_index_generics(context->index, fn, &generic_count);
 			if (generic_count > 16) continue;

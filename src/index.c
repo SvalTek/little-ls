@@ -2087,6 +2087,8 @@ static ltls_TypeSet clone_types(ltls_Clone* clone, ltls_TypeSet types)
 			lt_AstNodeType node_type = type->kind == LTLS_TYPE_TABLE ? LT_AST_NODE_TABLE
 				: type->kind == LTLS_TYPE_FUNCTION ? LT_AST_NODE_FN : LT_AST_NODE_CLASS;
 			lt_AstNode* node = clone_source_node(clone, type->node, node_type);
+			/* A truncated graph is unknown, not a partially known union. */
+			if (type->node && !node) return 0;
 			result = ltls_type_add(clone->target, result,
 				type->kind == LTLS_TYPE_INSTANCE ? LTLS_TYPE_INSTANCE
 				: type->kind == LTLS_TYPE_CLASS ? LTLS_TYPE_CLASS

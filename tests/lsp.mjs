@@ -162,6 +162,18 @@ async function main() {
   send({ jsonrpc: "2.0", id: 304, method: "textDocument/hover", params: { textDocument: { uri: cyclicUri }, position: { line: 1, character: 2 } } });
   assert.match((await waitFor((message) => message.id === 304, "large cyclic import hover", 15000)).result.contents.value, /fn accept\(options: Shape0\)/);
 
+  const manyFunctions = [];
+  for (let i = 0; i < 140; i++) manyFunctions.push(`fn f${i}(x) { return x }`);
+  manyFunctions.push("return {", ...Array.from({ length: 140 }, (_, i) => `  f${i}: f${i}`), "}", "");
+  writeFileSync(path.join(missingImportDir, "functions.little"), manyFunctions.join("\n"));
+  const manyFunctionsText = 'import { f139 } from "../functions"\nf139(1)\nvar alive = 42\n';
+  const manyFunctionsUri = "file:///" + missingImportDir.split(path.sep).join("/") + "/providers/functions-user.little";
+  writeFileSync(path.join(missingImportDir, "providers", "functions-user.little"), manyFunctionsText);
+  send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: manyFunctionsUri, languageId: "little", version: 1, text: manyFunctionsText } } });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === manyFunctionsUri, "large function import diagnostics", 15000);
+  send({ jsonrpc: "2.0", id: 305, method: "textDocument/hover", params: { textDocument: { uri: manyFunctionsUri }, position: { line: 2, character: 5 } } });
+  assert.match((await waitFor((message) => message.id === 305, "large function import hover", 15000)).result.contents.value, /var alive: number/);
+
   const classUri = "file:///test/klass.little";
   const classSource = "class Point {\n  x\n  length() {\n    return 1\n  }\n}\n";
   send({
