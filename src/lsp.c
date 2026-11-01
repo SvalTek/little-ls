@@ -3,7 +3,8 @@
 #include "docs.h"
 #include "index.h"
 
-#include "little.h"
+#include "little_frontend.h"
+#include "little_api.h"
 #include "yyjson.h"
 
 #include <stdio.h>

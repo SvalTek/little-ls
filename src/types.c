@@ -11,6 +11,7 @@
    repeats until the weak maps and function returns stop growing, which settles
    forward references and recursion. */
 #include "index.h"
+#include "little_api.h"
 #include "docs.h"
 
 #include <stdlib.h>

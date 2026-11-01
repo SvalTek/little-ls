@@ -18,15 +18,13 @@ $Compiler = if ($Compiler) { $Compiler } elseif ($env:GCC_PATH) { Join-Path $env
 $outDir = Join-Path $repo "build"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "analysis-tests.exe"
+. (Join-Path $LittleRoot "scripts/sources.ps1")
+$littleSources = @($LittleAnalysisSources | ForEach-Object { Join-Path $LittleRoot $_ })
 
 & $Compiler -std=c11 -O1 -g `
     -I (Join-Path $LittleRoot "src") `
     (Join-Path $repo "tests/analysis.c") `
-    (Join-Path $LittleRoot "src/little.c") `
-    (Join-Path $LittleRoot "src/little_analysis.c") `
-    (Join-Path $LittleRoot "src/little_buffer.c") `
-    (Join-Path $LittleRoot "src/little_common.c") `
-    (Join-Path $LittleRoot "src/little_async.c") `
+    $littleSources `
     -o $exe
 
 if ($LASTEXITCODE -ne 0) {
@@ -44,11 +42,7 @@ $docsExe = Join-Path $outDir "docs-tests.exe"
     -I (Join-Path $repo "src") `
     (Join-Path $repo "tests/docs.c") `
     (Join-Path $repo "src/docs.c") `
-    (Join-Path $LittleRoot "src/little.c") `
-    (Join-Path $LittleRoot "src/little_analysis.c") `
-    (Join-Path $LittleRoot "src/little_buffer.c") `
-    (Join-Path $LittleRoot "src/little_common.c") `
-    (Join-Path $LittleRoot "src/little_async.c") `
+    $littleSources `
     -o $docsExe
 
 if ($LASTEXITCODE -ne 0) {

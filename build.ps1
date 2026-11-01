@@ -19,6 +19,8 @@ $Compiler = if ($Compiler) { $Compiler } elseif ($env:GCC_PATH) { Join-Path $env
 $outPath = Join-Path $repo $Output
 $outDir = Split-Path -Parent $outPath
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+. (Join-Path $LittleRoot "scripts/sources.ps1")
+$littleSources = @($LittleAnalysisSources | ForEach-Object { Join-Path $LittleRoot $_ })
 
 # Only the analysis-capable core is linked; the standard library is not needed
 # because worker VMs get their initializer from the host instead.
@@ -34,11 +36,7 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     (Join-Path $repo "src/index.c") `
     (Join-Path $repo "src/imports.c") `
     (Join-Path $repo "src/types.c") `
-    (Join-Path $LittleRoot "src/little.c") `
-    (Join-Path $LittleRoot "src/little_analysis.c") `
-    (Join-Path $LittleRoot "src/little_buffer.c") `
-    (Join-Path $LittleRoot "src/little_common.c") `
-    (Join-Path $LittleRoot "src/little_async.c") `
+    $littleSources `
     (Join-Path $LittleRoot "vendor/yyjson/yyjson.c") `
     -o $outPath
 

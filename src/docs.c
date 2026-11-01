@@ -1,4 +1,5 @@
 #include "docs.h"
+#include "little_api.h"
 
 #include <stdlib.h>
 #include <string.h>

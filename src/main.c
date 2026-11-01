@@ -7,7 +7,8 @@
 #include <io.h>
 #endif
 
-#include "little.h"
+#include "little_frontend.h"
+#include "little_api.h"
 #include "lsp.h"
 
 #define LTLS_VERSION "0.1.0"
