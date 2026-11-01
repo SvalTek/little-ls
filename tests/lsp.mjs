@@ -1064,6 +1064,12 @@ async function main() {
   assert.match((await importHover(115, 2, 4)).result.contents.value, /var g: string/);
   assert.match((await importHover(116, 3, 4)).result.contents.value, /var first: string/);
   assert.match((await importHover(117, 5, 14)).result.contents.value, /field answer: number/);
+  assert.match((await importHover(120, 0, 18)).result.contents.value, /class Thing/);
+
+  send({ jsonrpc: "2.0", id: 121, method: "textDocument/definition", params: { textDocument: { uri: importMainUri }, position: { line: 0, character: 18 } } });
+  const bindingDefinition = await waitFor((message) => message.id === 121, "binding definition");
+  assert.ok(bindingDefinition.result.uri.endsWith("/mod.little"), "binding definition should target the class");
+  assert.equal(bindingDefinition.result.range.start.line, 3);
 
   send({ jsonrpc: "2.0", id: 118, method: "textDocument/completion", params: { textDocument: { uri: importMainUri }, position: { line: 5, character: 11 } } });
   const importCompletion = await waitFor((message) => message.id === 118, "module completion");

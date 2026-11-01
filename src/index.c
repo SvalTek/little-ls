@@ -61,6 +61,7 @@ static void add_declaration(ltls_Index* index, lt_Token* name, lt_Span span, lt_
 	declaration.detail = 0;
 	declaration.signature = 0;
 	declaration.signature_owned = 0;
+	declaration.alias = 0;
 	declaration.origin_uri = 0;
 	declaration.origin_line = 0;
 	declaration.origin_col = 0;
@@ -1802,9 +1803,13 @@ static void clone_declaration(ltls_Clone* clone, const ltls_Declaration* declara
 	lt_Token* name = clone_name_token(clone, declaration->name);
 	if (!name) return;
 
+	/* Clone the type first: cloning a class/table/function adds declarations,
+	   which reallocs the declaration table and invalidates cached pointers. */
+	ltls_TypeSet types = clone_types(clone, declaration->types);
+
 	add_declaration(clone->target, name, name->span, 0, owner, 0, declaration->kind, declaration->is_global);
 	ltls_Declaration* copy = &clone->target->declarations[clone->target->declaration_count - 1];
-	copy->types = clone_types(clone, declaration->types);
+	copy->types = types;
 	copy->from_doc = declaration->from_doc;
 	copy->origin_uri = declaration->origin_uri ? copy_text(declaration->origin_uri) : copy_text(clone->origin_uri);
 	copy->origin_line = declaration->origin_uri ? declaration->origin_line : declaration->name->line;
@@ -1869,6 +1874,7 @@ static lt_AstNode* clone_class(ltls_Clone* clone, lt_AstNode* source)
 	declaration->origin_col = source->class_decl.identifier->col;
 	declaration->origin_length =
 		(uint16_t)(source->class_decl.identifier->span.end - source->class_decl.identifier->span.start);
+	declaration->detail = clone_docs(clone, source->class_decl.identifier->line);
 
 	if (source->class_decl.superclass)
 	{
