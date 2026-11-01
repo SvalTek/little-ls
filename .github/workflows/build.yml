@@ -1,0 +1,120 @@
+name: Build, test, and release
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: little-ls-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out little-ls
+        uses: actions/checkout@v4
+        with:
+          path: little-ls
+          persist-credentials: false
+      - name: Check out little
+        uses: actions/checkout@v4
+        with:
+          repository: SvalTek/little
+          ref: develop
+          path: little
+          submodules: recursive
+          persist-credentials: false
+      - name: Build and test
+        shell: pwsh
+        run: ./little-ls/test.ps1
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp little-ls/build/little-ls.exe dist/little-ls-linux-x64
+          chmod +x dist/little-ls-linux-x64
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: little-ls-linux-x64
+          path: dist/little-ls-linux-x64
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - name: Check out little-ls
+        uses: actions/checkout@v4
+        with:
+          path: little-ls
+          persist-credentials: false
+      - name: Check out little
+        uses: actions/checkout@v4
+        with:
+          repository: SvalTek/little
+          ref: develop
+          path: little
+          submodules: recursive
+          persist-credentials: false
+      - name: Install C toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+      - name: Build and test
+        shell: pwsh
+        run: |
+          $gcc = Get-ChildItem -Path $env:RUNNER_TEMP -Filter gcc.exe -Recurse |
+            Where-Object FullName -Match '[\\/]ucrt64[\\/]bin[\\/]gcc\.exe$' |
+            Select-Object -First 1
+          if (!$gcc) { throw 'MSYS2 UCRT64 gcc.exe was not found.' }
+          $env:GCC_PATH = Split-Path $gcc.DirectoryName
+          ./little-ls/test.ps1
+      - name: Stage binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item little-ls/build/little-ls.exe dist/little-ls-windows-x64.exe
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: little-ls-windows-x64
+          path: dist/little-ls-windows-x64.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: little-ls-linux-x64
+          path: release
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: little-ls-windows-x64
+          path: release
+      - name: Attach binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
+          gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
