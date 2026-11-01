@@ -196,11 +196,10 @@ static char* try_candidate(const char* base, const char* specifier)
 	if (!suffixed) { free(path); return 0; }
 	memcpy(suffixed, path, length);
 	memcpy(suffixed + length, ".little", 8);
-	free(path);
 
 	char* found = file_exists(suffixed);
 	free(suffixed);
-	if (found) return found;
+	if (found) { free(path); return found; }
 
 	char* init = join_path(path, "init.little");
 	free(path);

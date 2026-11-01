@@ -103,8 +103,10 @@ surprising. It is not a bug list; most of these are bounded choices.
 
 ## Completion
 
-- No context filtering. Keywords are offered inside member access and inside
-  strings/comments; the client is expected to filter.
+- Expected table-field completion is limited to known callable parameters and
+  nested table fields at the start of a line or immediately after `{`. It does
+  not infer expected fields for assignments or arbitrary expressions. For
+  later call arguments, it requires comma separators to identify the parameter.
 - No auto-import, no snippet placeholders, no sorting beyond insertion order.
 - Only fields/methods are offered after `.`/`:`; array indexing and table
   string keys are not completion contexts.
@@ -113,10 +115,11 @@ surprising. It is not a bug list; most of these are bounded choices.
 
 ## Signature help
 
-- Parameter documentation comes only from `- name: text` bullets in
-  `declaration->detail`, i.e. standard-library and imported bindings. User doc
-  comments are not shown here.
+- Parameter descriptions come from local `@param` comments or imported and
+  standard-library documentation; known table shapes also list their fields.
 - Bracketed optional parameters are flattened (`[start,]` becomes a label).
+- Active argument selection counts commas, so whitespace-only argument
+  separation does not identify later parameters.
 - Does not model forwarded or expanded multi-value arguments.
 
 ## References, highlights, rename
@@ -157,10 +160,12 @@ surprising. It is not a bug list; most of these are bounded choices.
 - Modules are re-read and re-analysed on every request. There is no cache
   across requests.
 - Cycles resolve to unknown. There is no cycle diagnostic.
+- Each imported value can clone at most 128 class, function and table nodes;
+  shapes beyond that limit are left unknown.
 - Diagnostics inside imported modules are not published.
 - Bundled/archive loaders and `loadLibrary` are not modelled.
-- Imported docs are flattened into text; live doc hover and doc-derived
-  signature help are not available across files.
+- Imported doc descriptions are flattened into text, while callable parameter
+  types and referenced table shapes are cloned as semantic metadata.
 
 ## Other requests
 

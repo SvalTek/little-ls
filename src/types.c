@@ -681,7 +681,6 @@ static void apply_function_docs(ltls_Context* context, lt_AstNode* fn)
 	for (uint32_t i = 0; i < doc.param_count; i++)
 	{
 		ltls_TypeSet type = annotation_type(context, doc.params[i].type);
-		if (!type) continue;
 
 		for (uint8_t a = 0; a <= LT_MAX_FUNCTION_PARAMS; a++)
 		{
@@ -692,7 +691,29 @@ static void apply_function_docs(ltls_Context* context, lt_AstNode* fn)
 			if (!name || strcmp(name, doc.params[i].name) != 0) continue;
 
 			ltls_Declaration* declaration = declaration_for_token(context->index, argument);
-			if (declaration) write_declaration(context, declaration, type);
+			if (declaration)
+			{
+				if (!declaration->annotation && doc.params[i].type)
+				{
+					size_t length = strlen(doc.params[i].type) + 1;
+					declaration->annotation = malloc(length);
+					if (declaration->annotation) memcpy(declaration->annotation, doc.params[i].type, length);
+				}
+				if (!declaration->detail && doc.params[i].description && doc.params[i].description[0])
+				{
+					size_t length = strlen(doc.params[i].description) + 1;
+					declaration->detail = malloc(length);
+					if (declaration->detail) memcpy(declaration->detail, doc.params[i].description, length);
+				}
+				declaration->optional = doc.params[i].default_value != 0;
+				if (!declaration->default_value && doc.params[i].default_value)
+				{
+					size_t length = strlen(doc.params[i].default_value) + 1;
+					declaration->default_value = malloc(length);
+					if (declaration->default_value) memcpy(declaration->default_value, doc.params[i].default_value, length);
+				}
+				if (type) write_declaration(context, declaration, type);
+			}
 			break;
 		}
 	}
@@ -797,19 +818,6 @@ static void bind_parameter(ltls_Context* context, const char* const* names, uint
 	}
 }
 
-static const ltls_Declaration* member_named(const ltls_Index* index, lt_AstNode* class_node, const char* name)
-{
-	for (uint32_t i = 0; i < index->declaration_count; i++)
-	{
-		const ltls_Declaration* declaration = &index->declarations[i];
-		if (declaration->node != class_node) continue;
-		if (declaration->kind < LTLS_DECL_FIELD || declaration->kind > LTLS_DECL_PROPERTY) continue;
-		const char* candidate = token_text(index, declaration->name);
-		if (candidate && strcmp(candidate, name) == 0) return declaration;
-	}
-	return 0;
-}
-
 static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 {
 	ltls_TypeSet callee = analyze_expression(context, node->call.callee);
@@ -906,6 +914,7 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 		if (type->kind == LTLS_TYPE_FUNCTION)
 		{
 			lt_AstNode* fn = type->node;
+			if (!fn) continue;
 			uint32_t generic_count = 0;
 			const char* const* names = ltls_index_generics(context->index, fn, &generic_count);
 			if (generic_count > 16) continue;
@@ -943,7 +952,7 @@ static ltls_TypeSet analyze_call(ltls_Context* context, lt_AstNode* node)
 			const char* const* names = ltls_index_generics(context->index, klass, &generic_count);
 			if (generic_count > 16) continue;
 
-			const ltls_Declaration* constructor = member_named(context->index, klass, "constructor");
+			const ltls_Declaration* constructor = ltls_index_constructor(context->index, klass);
 			lt_AstNode* fn = constructor ? ltls_index_function_node(constructor) : 0;
 			if (!fn) continue;
 
@@ -1438,7 +1447,7 @@ static void apply_declaration_annotations(ltls_Context* context)
 			? ltls_index_generics(context->index, declaration->node, &context->generic_count) : 0;
 		if (!declaration->node) context->generic_count = 0;
 
-		if (declaration->annotation)
+		if (declaration->annotation && !declaration->origin_uri)
 		{
 			ltls_TypeSet type = annotation_type(context, declaration->annotation);
 			if (type)

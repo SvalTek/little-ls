@@ -387,7 +387,7 @@ static void publish_diagnostics(const char* uri, int64_t version, const char* te
    Document symbols
    ------------------------------------------------------------------------- */
 
-static const char* token_name(lt_Analysis* analysis, lt_Token* token)
+static const char* token_name(const lt_Analysis* analysis, lt_Token* token)
 {
 	if (!token) return 0;
 	if (token->type != LT_TOKEN_IDENTIFIER && token->type != LT_TOKEN_CONSTRUCTOR) return 0;
@@ -672,10 +672,14 @@ static const ltls_Declaration* resolve_alias(const ltls_Index* index, const ltls
 	for (uint8_t depth = 0; depth < 3 && target && target->alias; depth++)
 	{
 		target = target->alias;
+	}
+	if (!target) return declaration;
+	if (target == declaration && target->kind != LTLS_DECL_FIELD) return target;
+	{
 		ltls_TypeSet basis = target->types ? target->types : declaration->types;
-		if (!basis || basis->next) continue;
-		if (basis->kind != LTLS_TYPE_CLASS && basis->kind != LTLS_TYPE_FUNCTION) continue;
-		if (!basis->node) continue;
+		if (!basis || basis->next) return target;
+		if (basis->kind != LTLS_TYPE_CLASS && basis->kind != LTLS_TYPE_FUNCTION) return target;
+		if (!basis->node) return target;
 
 		for (uint32_t i = 0; i < index->declaration_count; i++)
 		{
@@ -691,6 +695,84 @@ static const ltls_Declaration* resolve_alias(const ltls_Index* index, const ltls
 		}
 	}
 	return target ? target : declaration;
+}
+
+static ltls_TypeSet parameter_type(const ltls_Index* index, const ltls_Declaration* declaration, const char* name)
+{
+	for (uint32_t i = 0; i <= LT_MAX_FUNCTION_PARAMS; i++)
+	{
+		const ltls_Declaration* parameter = ltls_index_parameter(index, declaration, i);
+		if (!parameter) break;
+		const char* candidate = ltls_index_token_text(index, parameter->name);
+		if (candidate && strcmp(candidate, name) == 0) return parameter->types;
+	}
+	return 0;
+}
+
+static void append_parameter_label(ltls_Markdown* text, const ltls_Index* index, const ltls_Declaration* parameter)
+{
+	const char* name = ltls_index_token_text(index, parameter->name);
+	if (!name) return;
+	markdown_append(text, name);
+	if (parameter->annotation && parameter->annotation[0])
+	{
+		markdown_append(text, ": ");
+		markdown_append(text, parameter->annotation);
+	}
+	else if (parameter->types)
+	{
+		char description[256];
+		ltls_type_describe(index, parameter->types, description, sizeof(description));
+		if (strcmp(description, "unknown") != 0)
+		{
+			markdown_append(text, ": ");
+			markdown_append(text, description);
+		}
+	}
+}
+
+static char* display_signature(const ltls_Index* index, const ltls_Declaration* declaration, ltls_TypeSet override)
+{
+	char* signature = ltls_declaration_signature(index, declaration, override);
+	const ltls_Declaration* constructor = declaration->kind == LTLS_DECL_CLASS
+		? ltls_index_constructor(index, declaration->node) : 0;
+	if (!signature) return 0;
+	char* method = constructor ? ltls_declaration_signature(index, constructor, 0) : 0;
+	const char* arguments = method ? strchr(method, '(') : 0;
+	if (arguments)
+	{
+		size_t length = strlen(signature) + strlen(arguments) + 1;
+		char* combined = malloc(length);
+		if (combined)
+		{
+			snprintf(combined, length, "%s%s", signature, arguments);
+			free(signature);
+			signature = combined;
+		}
+	}
+	free(method);
+	const char* open = strchr(signature, '(');
+	const char* close = open ? strchr(open, ')') : 0;
+	if (open && close && ltls_index_parameter(index, declaration, 0))
+	{
+		ltls_Markdown typed = { 0 };
+		char* prefix = malloc((size_t)(open - signature) + 2);
+		if (!prefix) return signature;
+		memcpy(prefix, signature, (size_t)(open - signature) + 1);
+		prefix[open - signature + 1] = 0;
+		markdown_append(&typed, prefix);
+		free(prefix);
+		for (uint32_t i = 0; i <= LT_MAX_FUNCTION_PARAMS; i++)
+		{
+			const ltls_Declaration* parameter = ltls_index_parameter(index, declaration, i);
+			if (!parameter) break;
+			if (i) markdown_append(&typed, ", ");
+			append_parameter_label(&typed, index, parameter);
+		}
+		markdown_append(&typed, close);
+		if (typed.text) { free(signature); signature = typed.text; }
+	}
+	return signature;
 }
 
 static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
@@ -752,7 +834,7 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 				override = resolved;
 			}
 		}
-		char* signature = ltls_declaration_signature(&state.index, shown, override);
+		char* signature = display_signature(&state.index, shown, override);
 		ltls_Doc docs;
 		uint8_t has_docs = 0;
 		uint8_t param_docs = 0;
@@ -786,10 +868,26 @@ static yyjson_mut_val* build_hover(yyjson_mut_doc* document, void* context)
 				markdown_append_docs(&markdown, &docs, own_class);
 			}
 		}
-		if (shown->detail)
+		if (shown->detail && !param_docs)
 		{
 			markdown_append(&markdown, "\n\n");
 			markdown_append(&markdown, shown->detail);
+		}
+		const ltls_Declaration* constructor = shown->kind == LTLS_DECL_CLASS
+			? ltls_index_constructor(&state.index, shown->node) : 0;
+		if (constructor && constructor->detail)
+		{
+			markdown_append(&markdown, "\n\n");
+			markdown_append(&markdown, constructor->detail);
+		}
+		else if (constructor && !constructor->origin_uri)
+		{
+			ltls_Doc constructor_docs;
+			if (ltls_doc_for_line(&state.analysis.tokens, constructor->name->line, &constructor_docs))
+			{
+				markdown_append_docs(&markdown, &constructor_docs, 0);
+				ltls_doc_free(&constructor_docs);
+			}
 		}
 		if (!markdown.text) markdown_append(&markdown, "");
 
@@ -1056,14 +1154,49 @@ static yyjson_mut_val* completion_item(yyjson_mut_doc* document, const ltls_Inde
 	const ltls_Declaration* shown = resolve_alias(index, declaration);
 	yyjson_mut_obj_add_int(document, item, "kind", completion_kind(shown));
 
-	char* signature = ltls_declaration_signature(index, shown, 0);
+	char* signature = display_signature(index, shown, 0);
 	if (signature)
 	{
 		yyjson_mut_obj_add_strcpy(document, item, "detail", signature);
 		free(signature);
 	}
-	if (shown->detail)
-		yyjson_mut_obj_add_strcpy(document, item, "documentation", shown->detail);
+	ltls_Markdown docs_text = { 0 };
+	const ltls_Declaration* documented[2] = { shown, shown->kind == LTLS_DECL_CLASS
+		? ltls_index_constructor(index, shown->node) : 0 };
+	for (uint32_t i = 0; i < 2; i++)
+	{
+		const ltls_Declaration* entry = documented[i];
+		if (!entry) continue;
+		if (entry->detail)
+		{
+			if (docs_text.text) markdown_append(&docs_text, "\n\n");
+			markdown_append(&docs_text, entry->detail);
+		}
+		if (entry->default_value)
+		{
+			markdown_append(&docs_text, "\n\nDefault: `");
+			markdown_append(&docs_text, entry->default_value);
+			markdown_append(&docs_text, "`");
+		}
+		if (!entry->detail && !entry->origin_uri && !entry->external && !entry->from_doc)
+		{
+			ltls_Doc docs;
+			if (ltls_doc_for_line(index->tokens, entry->name->line, &docs))
+			{
+				markdown_append_docs(&docs_text, &docs, entry->kind == LTLS_DECL_CLASS
+					? ltls_index_token_text(index, entry->name) : 0);
+				ltls_doc_free(&docs);
+			}
+		}
+	}
+	if (docs_text.text && docs_text.text[0])
+	{
+		yyjson_mut_val* documentation = yyjson_mut_obj(document);
+		yyjson_mut_obj_add_strcpy(document, documentation, "kind", "markdown");
+		yyjson_mut_obj_add_strcpy(document, documentation, "value", docs_text.text);
+		yyjson_mut_obj_add_val(document, item, "documentation", documentation);
+	}
+	free(docs_text.text);
 
 	return item;
 }
@@ -1131,6 +1264,61 @@ static const ltls_Declaration* declaration_named(const ltls_Index* index, const 
 	return 0;
 }
 
+static const ltls_Declaration* resolve_callee(const ltls_AnalysisState* state, const char* text, uint32_t open)
+{
+	uint32_t end = open;
+	while (end && (text[end - 1] == ' ' || text[end - 1] == '\t')) end--;
+	lt_Token* token = token_ending_at(&state->analysis, end);
+	const ltls_Declaration* declaration = token ? ltls_index_resolve(&state->index, token->span.start, 0) : 0;
+	if (!declaration && token && token->span.start > 0 &&
+	    (text[token->span.start - 1] == '.' || text[token->span.start - 1] == ':'))
+	{
+		const ltls_Declaration* receiver = resolve_callee(state, text, token->span.start - 1);
+		for (ltls_TypeSet type = receiver ? receiver->types : 0; type && !declaration; type = type->next)
+		{
+			if (type->kind == LTLS_TYPE_INSTANCE || type->kind == LTLS_TYPE_CLASS)
+				declaration = ltls_index_member(&state->index, type->node, token);
+			else if (type->kind == LTLS_TYPE_TABLE)
+				declaration = ltls_index_table_field(&state->index, type->node, token);
+		}
+	}
+	if (!declaration && token && (token->span.start == 0 ||
+	    (text[token->span.start - 1] != '.' && text[token->span.start - 1] != ':')))
+	{
+		const char* name = token_name(&state->analysis, token);
+		uint32_t best_scope = 0, best_position = 0;
+		for (uint32_t i = 0; name && i < state->index.declaration_count; i++)
+		{
+			const ltls_Declaration* candidate = &state->index.declarations[i];
+			if (candidate->kind == LTLS_DECL_FIELD || candidate->kind == LTLS_DECL_METHOD ||
+			    candidate->kind == LTLS_DECL_PROPERTY) continue;
+			const char* candidate_name = ltls_index_token_text(&state->index, candidate->name);
+			if (!candidate_name || strcmp(candidate_name, name) != 0) continue;
+			if (candidate->external)
+			{
+				if (!declaration && candidate->is_global) declaration = candidate;
+				continue;
+			}
+			if (candidate->origin_uri || (candidate->name->flags & LT_TOKEN_SYNTHETIC)) continue;
+			if (candidate->name->span.start > token->span.start || !scope_contains_offset(candidate->scope, token->span.start)) continue;
+			uint32_t scope = candidate->scope && candidate->scope->start ? candidate->scope->start->span.start : 0;
+			uint32_t position = candidate->name->span.start;
+			if (!declaration || scope > best_scope || (scope == best_scope && position >= best_position))
+			{
+				declaration = candidate;
+				best_scope = scope;
+				best_position = position;
+			}
+		}
+	}
+	return declaration ? resolve_alias(&state->index, declaration) : 0;
+}
+
+static uint8_t add_expected_table_fields(yyjson_mut_doc* document, const ltls_AnalysisState* state,
+                                          const char* text, uint32_t start, uint32_t offset,
+                                          yyjson_mut_val* items);
+static uint32_t split_parameters(const char* label, char names[][64], uint32_t max);
+
 static yyjson_mut_val* build_completion(yyjson_mut_doc* document, void* context)
 {
 	ltls_PositionContext* position = context;
@@ -1150,6 +1338,7 @@ static yyjson_mut_val* build_completion(yyjson_mut_doc* document, void* context)
 	char separator = start > 0 ? text[start - 1] : 0;
 
 	yyjson_mut_val* items = yyjson_mut_arr(document);
+	uint8_t expected_fields = add_expected_table_fields(document, &state, text, start, offset, items);
 
 	if (separator == '.' || separator == ':' || separator == '@')
 	{
@@ -1206,7 +1395,7 @@ static yyjson_mut_val* build_completion(yyjson_mut_doc* document, void* context)
 				: ltls_index_members(&state.index, self_node, members, 512);
 		add_matching_members(document, &state.index, members, count, prefix, prefix_length, items);
 	}
-	else
+	else if (!expected_fields)
 	{
 		const char* claimed[512];
 		uint32_t claimed_count = 0;
@@ -1312,10 +1501,12 @@ typedef struct {
 	uint32_t commas;
 } ltls_Bracket;
 
-static uint8_t find_active_call(const char* text, uint32_t offset, uint32_t* open, uint32_t* commas)
+static uint32_t scan_brackets(const char* text, uint32_t offset, ltls_Bracket* stack, uint32_t max,
+                              uint32_t* line_start, uint8_t* in_literal)
 {
-	ltls_Bracket stack[64];
 	uint32_t depth = 0;
+	if (line_start) *line_start = 0;
+	if (in_literal) *in_literal = 0;
 
 	for (uint32_t i = 0; i < offset; i++)
 	{
@@ -1324,22 +1515,21 @@ static uint8_t find_active_call(const char* text, uint32_t offset, uint32_t* ope
 		{
 			for (i++; i < offset && text[i] != c; i++)
 				if (text[i] == '\\') i++;
+			if (i >= offset && in_literal) *in_literal = 1;
 			continue;
 		}
 		if (c == ';')
 		{
 			while (i < offset && text[i] != '\n') i++;
+			if (i >= offset && in_literal) *in_literal = 1;
+			if (i < offset && line_start) *line_start = i + 1;
 			continue;
 		}
+		if (c == '\n' && line_start) *line_start = i + 1;
 		if (c == '(' || c == '[' || c == '{')
 		{
-			if (depth < 64)
-			{
-				stack[depth].bracket = c;
-				stack[depth].open = i;
-				stack[depth].commas = 0;
-				depth++;
-			}
+			if (depth >= max) return 0;
+			stack[depth++] = (ltls_Bracket){ c, i, 0 };
 		}
 		else if (c == ')' || c == ']' || c == '}')
 		{
@@ -1350,10 +1540,100 @@ static uint8_t find_active_call(const char* text, uint32_t offset, uint32_t* ope
 			stack[depth - 1].commas++;
 		}
 	}
+	return depth;
+}
 
+static uint8_t find_active_call(const char* text, uint32_t offset, uint32_t* open, uint32_t* commas)
+{
+	ltls_Bracket stack[64];
+	uint32_t depth = scan_brackets(text, offset, stack, 64, 0, 0);
 	if (!depth || stack[depth - 1].bracket != '(') return 0;
 	*open = stack[depth - 1].open;
 	*commas = stack[depth - 1].commas;
+	return 1;
+}
+
+static uint8_t add_expected_table_fields(yyjson_mut_doc* document, const ltls_AnalysisState* state,
+                                          const char* text, uint32_t start, uint32_t offset,
+                                          yyjson_mut_val* items)
+{
+	ltls_Bracket stack[64];
+	uint32_t line_start = 0;
+	uint8_t in_literal = 0;
+	uint32_t depth = scan_brackets(text, start, stack, 64, &line_start, &in_literal);
+	if (in_literal) return 0;
+	if (depth < 2 || stack[depth - 1].bracket != '{') return 0;
+	uint32_t call_depth = depth - 1;
+	while (call_depth && stack[call_depth].bracket == '{') call_depth--;
+	if (stack[call_depth].bracket != '(' || call_depth + 1 >= depth) return 0;
+	uint32_t brace = stack[depth - 1].open;
+	uint32_t before = stack[call_depth + 1].open;
+	while (before && (text[before - 1] == ' ' || text[before - 1] == '\t' || text[before - 1] == '\n' || text[before - 1] == '\r')) before--;
+	if (!before || (text[before - 1] != '(' && text[before - 1] != ',')) return 0;
+	uint32_t segment = line_start > brace ? line_start : brace + 1;
+	for (uint32_t i = segment; i < start; i++)
+		if (text[i] != ' ' && text[i] != '\t' && text[i] != '\r') return 0;
+	uint32_t open = stack[call_depth].open, argument = stack[call_depth].commas;
+	const ltls_Declaration* declaration = resolve_callee(state, text, open);
+	if (!declaration) return 0;
+	const ltls_Declaration* parameter = ltls_index_parameter(&state->index, declaration, argument);
+	ltls_TypeSet types = parameter ? parameter->types : 0;
+	const ltls_Declaration* members[512];
+	for (uint32_t level = call_depth + 2; types && level < depth; level++)
+	{
+		uint32_t colon = stack[level].open;
+		while (colon && (text[colon - 1] == ' ' || text[colon - 1] == '\t' || text[colon - 1] == '\n' || text[colon - 1] == '\r')) colon--;
+		if (!colon || text[colon - 1] != ':') return 0;
+		uint32_t key_end = colon - 1;
+		while (key_end && (text[key_end - 1] == ' ' || text[key_end - 1] == '\t')) key_end--;
+		uint32_t key_start = key_end;
+		while (key_start && is_name_character(text[key_start - 1])) key_start--;
+		if (key_start == key_end) return 0;
+		uint32_t count = collect_members(&state->index, types, members, 512);
+		types = 0;
+		for (uint32_t i = 0; i < count; i++)
+		{
+			const char* name = ltls_index_token_text(&state->index, members[i]->name);
+			if (name && strlen(name) == key_end - key_start && strncmp(name, text + key_start, key_end - key_start) == 0)
+				{ types = members[i]->types; break; }
+		}
+	}
+	uint32_t members_count = collect_members(&state->index, types, members, 512);
+	if (!members_count) return 0;
+	for (uint32_t i = 0; i < members_count; i++)
+	{
+		const char* name = ltls_index_token_text(&state->index, members[i]->name);
+		if (!name || strncmp(name, text + start, offset - start) != 0) continue;
+		uint8_t present = 0;
+		uint32_t nesting = 0;
+		for (uint32_t p = brace + 1; text[p]; p++)
+		{
+			char c = text[p];
+			if (c == '"' || c == '\'') { for (p++; text[p] && text[p] != c; p++) if (text[p] == '\\' && text[p + 1]) p++; if (!text[p]) break; continue; }
+			if (c == ';') { while (text[p] && text[p] != '\n') p++; if (!text[p]) break; continue; }
+			if (c == '{' || c == '[' || c == '(') { nesting++; continue; }
+			if (c == '}' || c == ']' || c == ')') { if (!nesting) break; nesting--; continue; }
+			if (nesting || !is_name_character(c) || (p > brace + 1 && is_name_character(text[p - 1]))) continue;
+			uint32_t end_name = p;
+			while (text[end_name] && is_name_character(text[end_name])) end_name++;
+			uint32_t next = end_name;
+			while (text[next] == ' ' || text[next] == '\t') next++;
+			if (p != start && text[next] == ':' && strlen(name) == end_name - p && strncmp(name, text + p, end_name - p) == 0)
+				{ present = 1; break; }
+			p = end_name - 1;
+		}
+		if (present) continue;
+		yyjson_mut_val* item = completion_item(document, &state->index, members[i]);
+		if (!item) continue;
+		char* insert = malloc(strlen(name) + 3);
+		if (insert)
+		{
+			sprintf(insert, "%s: ", name);
+			yyjson_mut_obj_add_strcpy(document, item, "insertText", insert);
+			free(insert);
+		}
+		yyjson_mut_arr_add_val(items, item);
+	}
 	return 1;
 }
 
@@ -1384,15 +1664,19 @@ static uint32_t split_parameters(const char* label, char names[][64], uint32_t m
 	uint32_t count = 0;
 	uint32_t length = 0;
 	char current[64];
-	uint8_t bracket = 0;
+	uint8_t bracket = 0, brace = 0, angle = 0;
 
 	for (const char* cursor = open + 1; cursor < close; cursor++)
 	{
 		char c = *cursor;
 		if (c == '[') bracket++;
 		else if (c == ']' && bracket) bracket--;
+		else if (c == '{') brace++;
+		else if (c == '}' && brace) brace--;
+		else if (c == '<') angle++;
+		else if (c == '>' && angle) angle--;
 
-		if (c == ',' && !bracket)
+		if (c == ',' && !bracket && !brace && !angle)
 		{
 			count = flush_parameter(current, length, names, count, max);
 			length = 0;
@@ -1437,35 +1721,86 @@ static yyjson_mut_val* build_signature_help(yyjson_mut_doc* document, void* cont
 	yyjson_mut_val* result = 0;
 	if (find_active_call(text, offset, &open, &commas))
 	{
-		uint32_t callee_end = open;
-		while (callee_end > 0 && (text[callee_end - 1] == ' ' || text[callee_end - 1] == '\t')) callee_end--;
-
-		lt_Token* token = token_ending_at(&state.analysis, callee_end);
-		const ltls_Declaration* declaration = token
-			? ltls_index_resolve(&state.index, token->span.start, 0) : 0;
+		const ltls_Declaration* declaration = resolve_callee(&state, text, open);
 
 		if (declaration)
 		{
-			char* signature = ltls_declaration_signature(&state.index, declaration, 0);
+			const ltls_Declaration* documented = declaration->kind == LTLS_DECL_CLASS
+				? ltls_index_constructor(&state.index, declaration->node) : 0;
+			if (!documented) documented = declaration;
+			ltls_Doc docs;
+			uint8_t has_docs = !documented->origin_uri && !documented->external &&
+				ltls_doc_for_line(&state.analysis.tokens, documented->name->line, &docs);
+			char* signature = display_signature(&state.index, declaration, 0);
 			if (signature)
 			{
 				char names[32][64];
 				uint32_t count = split_parameters(signature, names, 32);
+				if (ltls_index_parameter(&state.index, declaration, 0))
+				{
+					count = 0;
+					while (count < 32 && ltls_index_parameter(&state.index, declaration, count)) count++;
+				}
 
 				yyjson_mut_val* parameters = yyjson_mut_arr(document);
 				for (uint32_t i = 0; i < count; i++)
 				{
 					yyjson_mut_val* parameter = yyjson_mut_obj(document);
-					yyjson_mut_obj_add_strcpy(document, parameter, "label", names[i]);
-					const char* doc = parameter_doc(declaration->detail, names[i]);
+					const char* parameter_name = 0;
+					const ltls_Declaration* semantic = ltls_index_parameter(&state.index, declaration, i);
+					if (semantic)
+					{
+						ltls_Markdown label = { 0 };
+						append_parameter_label(&label, &state.index, semantic);
+						yyjson_mut_obj_add_strcpy(document, parameter, "label", label.text ? label.text : "");
+						free(label.text);
+						parameter_name = ltls_index_token_text(&state.index, semantic->name);
+						if (!parameter_name) parameter_name = "";
+					}
+					else
+					{
+						yyjson_mut_obj_add_strcpy(document, parameter, "label", names[i]);
+						parameter_name = names[i];
+					}
+					const char* doc = semantic && semantic->detail ? semantic->detail : parameter_doc(documented->detail, parameter_name);
+					if (!doc && has_docs)
+						for (uint32_t j = 0; j < docs.param_count; j++)
+							if (docs.params[j].name && strcmp(docs.params[j].name, parameter_name) == 0)
+							{
+								doc = docs.params[j].description;
+								break;
+							}
+					ltls_Markdown param_documentation = { 0 };
 					if (doc)
 					{
-						char text[256];
 						size_t length = 0;
-						while (doc[length] && doc[length] != '\n' && length < sizeof(text) - 1)
-							text[length] = doc[length], length++;
-						text[length] = 0;
-						yyjson_mut_obj_add_strcpy(document, parameter, "documentation", text);
+						while (doc[length] && doc[length] != '\n') length++;
+						char* description = malloc(length + 1);
+						if (description) { memcpy(description, doc, length); description[length] = 0; markdown_append(&param_documentation, description); free(description); }
+					}
+					if (semantic && semantic->default_value)
+					{
+						markdown_append(&param_documentation, "\n\nDefault: ");
+						markdown_append(&param_documentation, semantic->default_value);
+					}
+					ltls_TypeSet type = semantic ? semantic->types : parameter_type(&state.index, declaration, parameter_name);
+					const ltls_Declaration* fields[512];
+					uint32_t field_count = collect_members(&state.index, type, fields, 512);
+					for (uint32_t field = 0; field < field_count; field++)
+					{
+						if (fields[field]->kind != LTLS_DECL_FIELD) continue;
+						char* detail = ltls_declaration_signature(&state.index, fields[field], 0);
+						if (!detail) continue;
+						markdown_append(&param_documentation, "\n- ");
+						markdown_append(&param_documentation, detail);
+						if (fields[field]->detail) { markdown_append(&param_documentation, " — "); markdown_append(&param_documentation, fields[field]->detail); }
+						if (fields[field]->default_value) { markdown_append(&param_documentation, " (default: "); markdown_append(&param_documentation, fields[field]->default_value); markdown_append(&param_documentation, ")"); }
+						free(detail);
+					}
+					if (param_documentation.text)
+					{
+						yyjson_mut_obj_add_strcpy(document, parameter, "documentation", param_documentation.text);
+						free(param_documentation.text);
 					}
 					yyjson_mut_arr_add_val(parameters, parameter);
 				}
@@ -1485,6 +1820,7 @@ static yyjson_mut_val* build_signature_help(yyjson_mut_doc* document, void* cont
 
 				free(signature);
 			}
+			if (has_docs) ltls_doc_free(&docs);
 		}
 	}
 

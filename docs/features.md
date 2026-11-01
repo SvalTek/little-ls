@@ -47,6 +47,9 @@ functions or blocks are not emitted.
   exists for them.
 - Imported declarations show the signature and docs copied from the module;
   the hover range highlights the hovered token, not a location in this file.
+- Classes show the parameters and documentation of their constructor, including
+  an inherited constructor when the class does not define one.
+- Callable signatures include available parameter annotations or inferred types.
 - `@name` hovers resolve against the active receiver; `this.name` against the
   enclosing class or owning table.
 - Virtual `@class`/`@field` declarations are hoverable; their fields resolve
@@ -90,6 +93,11 @@ General context (no receiver):
 Items carry `label`, `kind`, `detail` (signature or `var x: T`) and
 `documentation` where one exists. There is no context filtering: keywords are
 offered everywhere, and there is no auto-import or snippet insertion.
+Class details include constructor parameters when a constructor is known.
+Inside a table literal passed to a known annotated parameter, completion offers
+the expected shape's fields, including fields in nested table literals. Already
+written keys are omitted, and accepting a field inserts `name: `. This applies
+to local and imported functions, methods, and constructors.
 
 ## Signature help
 
@@ -100,10 +108,11 @@ cursor, ignoring strings and line comments, and resolves its callee.
 - Parameters are split on commas outside `[]`, e.g. `array.slice(array,
   start [, count])` becomes three labels with the optional marker trimmed.
 - `activeParameter` is the comma depth inside that call.
-- Parameter documentation is read from the declaration's `- name: text`
-  bullets, i.e. standard-library and imported bindings. User doc comments do
-  not currently populate parameter documentation here.
-- Works for method calls (`obj:method(`) and standard functions.
+- Parameter documentation comes from `@param` comments or the declaration's
+  `- name: text` bullets for standard-library and imported bindings.
+- Named and structural table parameters also show known fields and their docs.
+- Works for class constructors, imported aliases, method calls (`obj:method(`)
+  and standard functions.
 - Final-argument `unpack(...)` expansion is not modelled by signature help.
 
 ## References and highlights
