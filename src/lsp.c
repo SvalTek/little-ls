@@ -1606,19 +1606,19 @@ static uint8_t add_expected_table_fields(yyjson_mut_doc* document, const ltls_An
 		if (!name || strncmp(name, text + start, offset - start) != 0) continue;
 		uint8_t present = 0;
 		uint32_t nesting = 0;
-		for (uint32_t p = brace + 1; p < start; p++)
+		for (uint32_t p = brace + 1; text[p]; p++)
 		{
 			char c = text[p];
-			if (c == '"' || c == '\'') { for (p++; p < start && text[p] != c; p++) if (text[p] == '\\') p++; continue; }
-			if (c == ';') { while (p < start && text[p] != '\n') p++; continue; }
+			if (c == '"' || c == '\'') { for (p++; text[p] && text[p] != c; p++) if (text[p] == '\\' && text[p + 1]) p++; if (!text[p]) break; continue; }
+			if (c == ';') { while (text[p] && text[p] != '\n') p++; if (!text[p]) break; continue; }
 			if (c == '{' || c == '[' || c == '(') { nesting++; continue; }
-			if (c == '}' || c == ']' || c == ')') { if (nesting) nesting--; continue; }
+			if (c == '}' || c == ']' || c == ')') { if (!nesting) break; nesting--; continue; }
 			if (nesting || !is_name_character(c) || (p > brace + 1 && is_name_character(text[p - 1]))) continue;
 			uint32_t end_name = p;
-			while (end_name < start && is_name_character(text[end_name])) end_name++;
+			while (text[end_name] && is_name_character(text[end_name])) end_name++;
 			uint32_t next = end_name;
-			while (next < start && (text[next] == ' ' || text[next] == '\t')) next++;
-			if (next < start && text[next] == ':' && strlen(name) == end_name - p && strncmp(name, text + p, end_name - p) == 0)
+			while (text[next] == ' ' || text[next] == '\t') next++;
+			if (p != start && text[next] == ':' && strlen(name) == end_name - p && strncmp(name, text + p, end_name - p) == 0)
 				{ present = 1; break; }
 			p = end_name - 1;
 		}

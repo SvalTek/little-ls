@@ -160,6 +160,8 @@ surprising. It is not a bug list; most of these are bounded choices.
 - Modules are re-read and re-analysed on every request. There is no cache
   across requests.
 - Cycles resolve to unknown. There is no cycle diagnostic.
+- Each imported value can clone at most 128 class, function and table nodes;
+  shapes beyond that limit are left unknown.
 - Diagnostics inside imported modules are not published.
 - Bundled/archive loaders and `loadLibrary` are not modelled.
 - Imported doc descriptions are flattened into text, while callable parameter

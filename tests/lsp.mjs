@@ -148,6 +148,20 @@ async function main() {
   send({ jsonrpc: "2.0", id: 302, method: "textDocument/documentSymbol", params: { textDocument: { uri: missingImportUri } } });
   assert.ok((await waitFor((message) => message.id === 302, "symbols after missing imports")).result.some((symbol) => symbol.name === "label"));
 
+  const cyclicTypes = [];
+  for (let i = 0; i < 140; i++) {
+    cyclicTypes.push(`;; @struct Shape${i}`, `;; @field Shape${i === 139 ? i : i + 1} next`, "");
+  }
+  cyclicTypes.push(";; @param Shape0 options", "fn accept(options) {}", "return { accept: accept }", "");
+  writeFileSync(path.join(missingImportDir, "cyclic.little"), cyclicTypes.join("\n"));
+  const cyclicText = 'import { accept } from "../cyclic"\naccept({})\n';
+  const cyclicUri = "file:///" + missingImportDir.split(path.sep).join("/") + "/providers/cyclic-user.little";
+  writeFileSync(path.join(missingImportDir, "providers", "cyclic-user.little"), cyclicText);
+  send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: cyclicUri, languageId: "little", version: 1, text: cyclicText } } });
+  await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === cyclicUri, "large cyclic import diagnostics", 15000);
+  send({ jsonrpc: "2.0", id: 304, method: "textDocument/hover", params: { textDocument: { uri: cyclicUri }, position: { line: 1, character: 2 } } });
+  assert.match((await waitFor((message) => message.id === 304, "large cyclic import hover", 15000)).result.contents.value, /fn accept\(options: Shape0\)/);
+
   const classUri = "file:///test/klass.little";
   const classSource = "class Point {\n  x\n  length() {\n    return 1\n  }\n}\n";
   send({
@@ -1578,13 +1592,15 @@ async function main() {
   await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === unfinishedMethodUri, "unfinished method diagnostics");
   send({ jsonrpc: "2.0", id: 222, method: "textDocument/completion", params: { textDocument: { uri: unfinishedMethodUri }, position: { line: 3, character: 4 } } });
   assert.deepEqual((await waitFor((message) => message.id === 222, "unfinished method fields")).result.items.map((item) => item.label), ["token"]);
-  const usedText = 'import { Provider } from "provider"\nProvider("x", {\n  baseUrl: "x"\n  \n})';
+  const usedText = 'import { Provider } from "provider"\nProvider("x", {\n  \n  baseUrl: "x"\n  \n})';
   const usedUri = "file:///" + constructorDir.split(path.sep).join("/") + "/used.little";
   writeFileSync(path.join(constructorDir, "used.little"), usedText);
   send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri: usedUri, languageId: "little", version: 1, text: usedText } } });
   await waitFor((message) => message.method === "textDocument/publishDiagnostics" && message.params.uri === usedUri, "used field diagnostics");
-  send({ jsonrpc: "2.0", id: 214, method: "textDocument/completion", params: { textDocument: { uri: usedUri }, position: { line: 3, character: 2 } } });
+  send({ jsonrpc: "2.0", id: 214, method: "textDocument/completion", params: { textDocument: { uri: usedUri }, position: { line: 4, character: 2 } } });
   assert.deepEqual((await waitFor((message) => message.id === 214, "remaining fields")).result.items.map((item) => item.label).sort(), ["auth", "token"]);
+  send({ jsonrpc: "2.0", id: 303, method: "textDocument/completion", params: { textDocument: { uri: usedUri }, position: { line: 2, character: 2 } } });
+  assert.deepEqual((await waitFor((message) => message.id === 303, "fields below cursor")).result.items.map((item) => item.label).sort(), ["auth", "token"]);
   writeFileSync(path.join(constructorDir, "barrel.little"), 'import { Provider } from "provider"\nreturn { Provider: Provider }\n');
   const reexportConstructorText = 'import { Provider } from "barrel"\nProvider("x", {\n  \n})';
   const reexportConstructorUri = "file:///" + constructorDir.split(path.sep).join("/") + "/reexport.little";

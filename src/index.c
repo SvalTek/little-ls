@@ -1884,6 +1884,7 @@ static lt_AstNode* clone_function(ltls_Clone* clone, lt_AstNode* source)
 {
 	lt_AstNode* existing = clone_mapped(clone, source);
 	if (existing) return existing;
+	if (!source || clone->node_count >= sizeof(clone->nodes) / sizeof(clone->nodes[0])) return 0;
 
 	lt_AstNode* fn = synthetic_node(clone->target, LT_AST_NODE_FN);
 	if (!fn) return 0;
@@ -1950,6 +1951,7 @@ static lt_AstNode* clone_class(ltls_Clone* clone, lt_AstNode* source)
 {
 	lt_AstNode* existing = clone_mapped(clone, source);
 	if (existing) return existing;
+	if (!source || clone->node_count >= sizeof(clone->nodes) / sizeof(clone->nodes[0])) return 0;
 
 	const ltls_Declaration* source_declaration = 0;
 	for (uint32_t i = 0; i < clone->source->declaration_count; i++)
@@ -2029,6 +2031,7 @@ static lt_AstNode* clone_table(ltls_Clone* clone, lt_AstNode* source)
 {
 	lt_AstNode* existing = clone_mapped(clone, source);
 	if (existing) return existing;
+	if (!source || clone->node_count >= sizeof(clone->nodes) / sizeof(clone->nodes[0])) return 0;
 
 	lt_AstNode* table = synthetic_node(clone->target, LT_AST_NODE_TABLE);
 	if (!table) return 0;
