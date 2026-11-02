@@ -240,24 +240,31 @@ static void walk_node(ltls_Index* index, lt_AstNode* node, lt_Scope* scope, lt_A
 	case LT_AST_NODE_ELSEIF:
 	case LT_AST_NODE_ELSE:
 		walk_node(index, node->branch.expr, scope, class_node, receiver_token, receiver_expr);
-		walk_body(index, &node->branch.body, scope, class_node, receiver_token, receiver_expr);
+		walk_body(index, &node->branch.body, node->branch.scope ? node->branch.scope : scope,
+			class_node, receiver_token, receiver_expr);
 		walk_node(index, node->branch.next, scope, class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_FOR: {
 		lt_Scope* frame = scope ? scope->frame : 0;
-		if (frame && node->loop.identifier < frame->frame_slots.length)
+		lt_Scope* body_scope = node->loop.scope ? node->loop.scope : scope;
+		if (frame)
 		{
-			lt_Token* variable = *AT(lt_Token*, frame->frame_slots, node->loop.identifier);
-			if (variable) add_declaration(index, variable, variable->span, scope, node, 0, LTLS_DECL_LOCAL, 0);
+			for (uint8_t i = 0; i < node->loop.identifier_count; i++)
+			{
+				if (node->loop.identifier[i] >= frame->frame_slots.length) continue;
+				lt_Token* variable = *AT(lt_Token*, frame->frame_slots, node->loop.identifier[i]);
+				if (variable) add_declaration(index, variable, variable->span, body_scope, node, 0, LTLS_DECL_LOCAL, 0);
+			}
 		}
 		walk_node(index, node->loop.iterator, scope, class_node, receiver_token, receiver_expr);
-		walk_body(index, &node->loop.body, scope, class_node, receiver_token, receiver_expr);
+		walk_body(index, &node->loop.body, body_scope, class_node, receiver_token, receiver_expr);
 	} break;
 
 	case LT_AST_NODE_WHILE:
 		walk_node(index, node->loop.iterator, scope, class_node, receiver_token, receiver_expr);
-		walk_body(index, &node->loop.body, scope, class_node, receiver_token, receiver_expr);
+		walk_body(index, &node->loop.body, node->loop.scope ? node->loop.scope : scope,
+			class_node, receiver_token, receiver_expr);
 		break;
 
 	case LT_AST_NODE_INDEX: {
