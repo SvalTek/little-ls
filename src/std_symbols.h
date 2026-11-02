@@ -187,13 +187,15 @@ static const ltls_StdEntry ltls_std_members_web[] = {
 	{ "Request", "fn web.Request()", "represents an incoming server request exposing url, method, body, and headers.", "" },
 	{ "Response", "fn web.Response([body [, options]])", "represents an HTTP response with a status, headers, and body.\n- body: response body string\n- options: table with optional status, statusText, and headers fields", "" },
 	{ "Server", "fn web.Server()", "represents a running HTTP server exposing close() and the bound port.", "" },
+	{ "Stream", "fn web.Stream()", "represents a streaming HTTP client response returned by fetchStream, exposing next(), close(), status, statusText, ok, url, headers, and closed.", "" },
 	{ "fetch", "fn web.fetch(url [, init])", "requests a URL and returns a promise resolving to a web.Response.\n- url: absolute http or https URL to request\n- init: table with optional method, body, headers, redirects, proxy, and decompress fields", "" },
+	{ "fetchStream", "fn web.fetchStream(url [, init])", "requests a URL and returns a promise resolving to a web.Stream once response headers are available.\n- url: absolute http or https URL to request\n- init: table with optional method, body, headers, redirects, proxy, decompress, and binary fields", "" },
 	{ "serve", "fn web.serve(handler [, options])", "starts an HTTP server that passes each request to the handler and returns a web.Server.\n- handler: callable receiving a web.Request and returning a web.Response or a promise of one\n- options: table with optional port and hostname fields", "" },
 };
 
 static const ltls_StdEntry ltls_std_members_ws[] = {
 	{ "Server", "fn ws.Server()", "represents a running WebSocket server exposing close() and the bound port.", "" },
-	{ "WebSocket", "fn ws.WebSocket()", "represents a WebSocket connection exposing next(), send(), close(), url, and closed.", "" },
+	{ "WebSocket", "fn ws.WebSocket()", "represents a WebSocket connection exposing next(), send(), close(), url, and closed; it can be used as an async for source.", "" },
 	{ "connect", "fn ws.connect(url [, init])", "opens a WebSocket connection to the URL and returns a promise resolving to a ws.WebSocket.\n- url: ws or wss URL to connect to\n- init: table with an optional headers table", "" },
 	{ "serve", "fn ws.serve(handler [, options])", "starts a WebSocket server that passes each accepted connection to the handler and returns a ws.Server.\n- handler: callable receiving each accepted ws.WebSocket\n- options: table with optional hostname, port, and tls fields, where tls holds cert and key paths", "" },
 };
@@ -212,7 +214,7 @@ static const ltls_StdModule ltls_std_modules[] = {
 	{ "table", ltls_std_members_table, 6 },
 	{ "task", ltls_std_members_task, 1 },
 	{ "term", ltls_std_members_term, 15 },
-	{ "web", ltls_std_members_web, 5 },
+	{ "web", ltls_std_members_web, 7 },
 	{ "ws", ltls_std_members_ws, 4 },
 };
 #define LTLS_STD_MODULE_COUNT 15
